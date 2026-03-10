@@ -18,7 +18,14 @@ app.use(express.json());
 
 // ── DATE UTILS ───────────────────────────────────────────────────────────────
 function today() { return new Date().toISOString().split("T")[0]; }
-function inFuture(d) { return d && d >= today(); }
+function threeMonthsFromNow() {
+  const d = new Date();
+  d.setMonth(d.getMonth() + 3);
+  return d.toISOString().split("T")[0];
+}
+// Only pull events from today through 3 months out — keeps the list relevant
+function inWindow(d) { return d && d >= today() && d <= threeMonthsFromNow(); }
+function inFuture(d) { return d && d >= today(); } // kept for voting/council which may look further
 
 // ── AIRTABLE HELPER ──────────────────────────────────────────────────────────
 async function airtable(path, method = "GET", body = null) {
@@ -61,7 +68,7 @@ async function scrapeCouncil() {
   let m;
   while ((m = re.exec(html)) !== null) {
     const date = parseDate(m[0]);
-    if (!date || !inFuture(date) || seen.has(date)) continue;
+    if (!date || !inWindow(date) || seen.has(date)) continue;
     seen.add(date);
     events.push({
       name: "Austin City Council Regular Meeting",
@@ -85,7 +92,7 @@ async function scrapeVoting() {
   let m;
   while ((m = re.exec(html)) !== null) {
     const date = parseDate(m[0]);
-    if (!date || !inFuture(date) || seen.has(date)) continue;
+    if (!date || !inWindow(date) || seen.has(date)) continue;
     seen.add(date);
     events.push({
       name: "Travis County Election / Voting Date",
@@ -126,17 +133,60 @@ async function scrapeMobilize() {
           source: e.browser_url || "",
         };
       })
-      .filter(e => e.date && inFuture(e.date));
+      .filter(e => e.date && inWindow(e.date));
   } catch(e) { console.warn("Mobilize scrape failed:", e.message); return []; }
 }
 
-// Hands Off Central TX — Squarespace event page parser
+// Hands Off Central TX — uses Squarespace JSON API, then JSON-LD, then HTML fallback
 async function scrapeHandsOff() {
-  const html = await fetchHTML("https://www.handsoffcentraltx.org/events");
+  const BASE = "https://www.handsoffcentraltx.org";
+
+  // ── METHOD 1: Squarespace JSON API (most reliable, returns structured data) ─
+  try {
+    const res = await fetch(`${BASE}/events?format=json`, {
+      headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.netlify.app)" },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const items = data.items || data.upcomingEvents || [];
+      const events = [];
+      for (const item of items) {
+        // Squarespace stores dates as milliseconds or ISO string
+        const startMs = item.startDate;
+        if (!startMs) continue;
+        const d = new Date(typeof startMs === "number" ? startMs : startMs);
+        const date = d.toISOString().split("T")[0];
+        if (!inWindow(date)) continue;
+        const time = d.toTimeString().slice(0, 5);
+        const loc = item.location?.addressLine1
+          || item.location?.mapWidget?.mapAddress
+          || item.location?.name
+          || "Austin, TX (see source for location)";
+        // Strip HTML tags from description/excerpt
+        const rawDesc = (item.excerpt || item.body || item.description || "").replace(/<[^>]*>/g,"").trim();
+        const desc = rawDesc.slice(0, 250) || "Community civic event from Hands Off Central TX. See source link for full details.";
+        events.push({
+          name: (item.title || "Hands Off Central TX Event").slice(0, 100),
+          type: "protest", date, time: time || "13:00",
+          address: loc,
+          lat: parseFloat(item.location?.markerLat) || 30.2747,
+          lng: parseFloat(item.location?.markerLng) || -97.7403,
+          desc,
+          source: item.fullUrl ? `${BASE}${item.fullUrl}` : `${BASE}/events`,
+        });
+      }
+      if (events.length > 0) {
+        console.log(`HandsOff (Squarespace API): ${events.length} events`);
+        return events;
+      }
+    }
+  } catch(e) { console.warn("HandsOff Squarespace API failed:", e.message); }
+
+  // ── METHOD 2: JSON-LD structured data embedded in the HTML page ─────────────
+  const html = await fetchHTML(`${BASE}/events`);
   if (!html) return [];
   const events = [];
-
-  // Squarespace stores events in JSON inside <script type="application/ld+json">
   const jsonBlocks = [];
   const jsonRe = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/gi;
   let jm;
@@ -149,28 +199,40 @@ async function scrapeHandsOff() {
       }
     } catch(e) {}
   }
-
   if (jsonBlocks.length > 0) {
     for (const ev of jsonBlocks) {
       const date = parseDate(ev.startDate);
-      if (!date || !inFuture(date)) continue;
+      if (!date || !inWindow(date)) continue;
       const timeStr = ev.startDate?.includes("T") ? ev.startDate.split("T")[1]?.slice(0,5) : "13:00";
       const loc = ev.location?.name || ev.location?.address?.streetAddress || "Austin, TX (see source for location)";
+      const rawDesc = (ev.description || "").replace(/<[^>]*>/g,"").trim();
       events.push({
         name: (ev.name || "Hands Off Central TX Event").slice(0, 100),
         type: "protest", date, time: timeStr || "13:00",
         address: loc,
         lat: parseFloat(ev.location?.geo?.latitude) || 30.2747,
         lng: parseFloat(ev.location?.geo?.longitude) || -97.7403,
-        desc: (ev.description || "Civic event from Hands Off Central TX.").replace(/<[^>]*>/g,"").slice(0, 250),
-        source: ev.url || "https://www.handsoffcentraltx.org/events",
+        desc: rawDesc.slice(0, 250) || "Community civic event from Hands Off Central TX. See source link for full details.",
+        source: ev.url || `${BASE}/events`,
       });
     }
-    return events;
+    if (events.length > 0) {
+      console.log(`HandsOff (JSON-LD): ${events.length} events`);
+      return events;
+    }
   }
 
-  // Fallback: find event links by /events/SLUG pattern — skip nav items
-  const NAV_ITEMS = new Set(["events","about","merch","civics","alfr","mutualaid","bookclub","book-club","donate","contact","home"]);
+  // ── METHOD 3: HTML fallback — parses event links, skips ALL navigation items ─
+  // Known UI strings that are NOT event names (mobile nav buttons, menu toggles, etc.)
+  const UI_STRINGS = new Set([
+    "open menu", "close menu", "open", "close", "menu", "toggle menu",
+    "navigation", "nav", "skip to content", "back to top",
+  ]);
+  const NAV_SLUGS = new Set([
+    "events","about","merch","civics","alfr","mutualaid","bookclub",
+    "book-club","donate","contact","home","open-menu","close-menu",
+    "openmenu","closemenu","toggle","skip","back",
+  ]);
   const linkRe = /href="(\/events\/([a-z0-9][a-z0-9\-]+))"[^>]*>([\s\S]{0,200}?)<\/a>/gi;
   const dateRe = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
   const seen = new Set();
@@ -178,24 +240,27 @@ async function scrapeHandsOff() {
   let dm;
   while ((dm = dateRe.exec(html)) !== null) {
     const date = parseDate(dm[0]);
-    if (date && inFuture(date)) dates.push(date);
+    if (date && inWindow(date)) dates.push(date);
   }
   let lm, dateIdx = 0;
   while ((lm = linkRe.exec(html)) !== null && dateIdx < dates.length) {
     const slug = lm[2].toLowerCase();
-    if (NAV_ITEMS.has(slug) || seen.has(slug)) continue;
+    if (NAV_SLUGS.has(slug) || seen.has(slug)) continue;
     seen.add(slug);
     const rawName = lm[3].replace(/<[^>]*>/g,"").trim();
     if (!rawName || rawName.length < 4) continue;
+    // Skip any UI navigation strings masquerading as event names
+    if (UI_STRINGS.has(rawName.toLowerCase())) continue;
     events.push({
       name: rawName.replace(/&amp;/g,"&").replace(/&#\d+;/g,"").slice(0,100),
       type: "protest", date: dates[dateIdx++], time: "13:00",
-      address: "Austin, TX (see source for venue)",
+      address: "Austin, TX (see source for venue details)",
       lat: 30.2747, lng: -97.7403,
-      desc: "Civic event from Hands Off Central TX. Verify venue and full details at source before approving.",
-      source: `https://www.handsoffcentraltx.org${lm[1]}`,
+      desc: "Community civic event from Hands Off Central TX. Visit the source link for venue, time, and full details before approving.",
+      source: `${BASE}${lm[1]}`,
     });
   }
+  console.log(`HandsOff (HTML fallback): ${events.length} events`);
   return events;
 }
 
@@ -212,7 +277,7 @@ async function scrapeAJC() {
   while ((m = nameRe.exec(html)) !== null) names.push(m[1].trim());
   while ((m = dateRe.exec(html)) !== null) {
     const date = parseDate(m[0]);
-    if (date && inFuture(date)) dates.push(date);
+    if (date && inWindow(date)) dates.push(date);
   }
   for (let i = 0; i < Math.min(names.length, dates.length, 8); i++) {
     if (!names[i] || names[i].length < 4) continue;
@@ -238,7 +303,7 @@ async function scrapeLWV() {
   let m;
   while ((m = dateRe.exec(html)) !== null) {
     const date = parseDate(m[0]);
-    if (!date || !inFuture(date) || seen.has(date)) continue;
+    if (!date || !inWindow(date) || seen.has(date)) continue;
     seen.add(date);
     events.push({
       name: "League of Women Voters Austin — Event",
@@ -266,25 +331,34 @@ async function getExistingKeys() {
 }
 
 // ── SAVE BATCH TO AIRTABLE ───────────────────────────────────────────────────
+// ⚠️  HUMAN APPROVAL REQUIRED — SAFETY RULE ⚠️
+// Events saved here are ALWAYS "pending". They will NEVER go live automatically.
+// The ONLY way an event becomes "live" is when a human admin clicks Approve
+// in the admin panel at comnground.netlify.app/admin.html
+// DO NOT change Status to anything other than "pending" here. Ever.
 async function saveEvents(events) {
   const saved = [];
   for (let i = 0; i < events.length; i += 10) {
     const batch = events.slice(i, i + 10);
     try {
       const data = await airtable("", "POST", {
-        records: batch.map(e => ({ fields: {
-          Name:        e.name,
-          Type:        e.type,
-          Date:        e.date,
-          Time:        e.time        || "",
-          Address:     e.address     || "",
-          Latitude:    e.lat         || 30.2672,
-          Longitude:   e.lng         || -97.7431,
-          Description: e.desc        || "",
-          Source:      e.source      || "",
-          Status:      "pending",
-          SubmittedBy: "COMN Auto-Scraper",
-        }}))
+        records: batch.map(e => {
+          // SAFETY GUARD: Explicitly enforce pending status — auto-approval is forbidden
+          const status = "pending"; // This must never be changed to "live"
+          return { fields: {
+            Name:        e.name,
+            Type:        e.type,
+            Date:        e.date,
+            Time:        e.time        || "",
+            Address:     e.address     || "",
+            Latitude:    e.lat         || 30.2672,
+            Longitude:   e.lng         || -97.7431,
+            Description: e.desc        || "",
+            Source:      e.source      || "",
+            Status:      status,        // Always "pending" — human must approve
+            SubmittedBy: "COMN Auto-Scraper",
+          }};
+        })
       });
       saved.push(...(data.records || []));
     } catch(e) { console.error("Save batch error:", e.message); }
@@ -428,7 +502,8 @@ app.post("/submit", async (req, res) => {
         Latitude:    parseFloat(f.lat)  || 30.2672,
         Longitude:   parseFloat(f.lng)  || -97.7431,
         Description: f.desc   || "", Source: f.source || "",
-        Status: "pending", SubmittedBy: f.submittedBy || "Public",
+        Status: "pending", // Always pending — human must approve before going live
+        SubmittedBy: f.submittedBy || "Public",
       }}]
     });
     res.json({ success: true, id: data.records?.[0]?.id });
@@ -438,11 +513,16 @@ app.post("/submit", async (req, res) => {
   }
 });
 
+// ⚠️  This endpoint is the ONLY way an event becomes "live".
+// It requires a human to manually click Approve in the admin panel.
+// There is no automated path to "live" — all auto-scraper code uses "pending" only.
 app.patch("/admin/events/:id", async (req, res) => {
   try {
     const { status } = req.body;
     if (!["live","rejected"].includes(status))
       return res.status(400).json({ error: "Invalid status" });
+    // Log every approval so there's a clear audit trail
+    console.log(`[HUMAN ACTION] Event ${req.params.id} set to "${status}" via admin panel`);
     await airtable(`/${req.params.id}`, "PATCH", { fields: { Status: status } });
     res.json({ success: true });
   } catch(e) {
