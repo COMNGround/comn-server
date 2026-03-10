@@ -19,6 +19,19 @@ const DIGEST_EMAIL = process.env.DIGEST_EMAIL || "bywilliamcole@gmail.com";
 const ADMIN_URL    = "https://comnground.netlify.app/admin.html";
 const JWT_SECRET   = process.env.JWT_SECRET || "comn-dev-jwt-secret-CHANGE-IN-PROD";
 
+function generateToken() {
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+async function getInviteToken() {
+  const filter = encodeURIComponent(`{Role}="invite_token"`);
+  const data = await airtableAdmins(`?filterByFormula=${filter}&maxRecords=1`);
+  if (data.records && data.records.length > 0) return data.records[0].fields.DisplayName || null;
+  const token = generateToken();
+  await airtableAdmins("", "POST", { records: [{ fields: { Email: "_invite_token", DisplayName: token, Role: "invite_token" } }] });
+  return token;
+}
+
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
@@ -578,48 +591,48 @@ app.post("/submit", async (req, res) => {
 
 // ── ADMIN AUTH ────────────────────────────────────────────────────────────────
 
-// Check if any admins exist (for first-time setup)
+// Check if any real admins exist (excludes invite_token records)
 app.get("/admin/auth/status", async (req, res) => {
   try {
-    const data = await airtableAdmins("?fields[]=Email&maxRecords=1");
+    const filter = encodeURIComponent(`NOT({Role}="invite_token")`);
+    const data = await airtableAdmins(`?filterByFormula=${filter}&fields[]=Email&maxRecords=1`);
     res.json({ hasAdmins: (data.records || []).length > 0 });
   } catch(e) {
     res.json({ hasAdmins: false });
   }
 });
 
-// Register (first = super_admin; subsequent requires super_admin token)
+// Register — first account = super_admin (no invite needed); others need valid invite token
 app.post("/admin/auth/register", async (req, res) => {
   try {
-    const { email, password, name } = req.body;
+    const { email, password, name, inviteToken } = req.body;
     if (!email || !password || !name)
-      return res.status(400).json({ error: "Email, name, and password are required" });
+      return res.status(400).json({ error: "Name, email and password are required" });
     if (password.length < 8)
       return res.status(400).json({ error: "Password must be at least 8 characters" });
 
-    const existing = await airtableAdmins("?fields[]=Email");
+    // Check if any real admins already exist
+    const filter = encodeURIComponent(`NOT({Role}="invite_token")`);
+    const existing = await airtableAdmins(`?filterByFormula=${filter}&fields[]=Email&maxRecords=1`);
     const isFirstAdmin = (existing.records || []).length === 0;
 
     if (!isFirstAdmin) {
-      const token = (req.headers.authorization || "").replace("Bearer ", "").trim();
-      if (!token) return res.status(403).json({ error: "Only a super admin can add new admins" });
-      let decoded;
-      try { decoded = jwt.verify(token, JWT_SECRET); } catch(e) {
-        return res.status(403).json({ error: "Invalid token — super admin login required" });
-      }
-      if (decoded.role !== "super_admin")
-        return res.status(403).json({ error: "Only a super admin can add new admins" });
+      if (!inviteToken)
+        return res.status(403).json({ error: "An invite link is required to apply as admin" });
+      const validToken = await getInviteToken();
+      if (inviteToken !== validToken)
+        return res.status(403).json({ error: "Invalid or expired invite link — ask the Super Admin for a new one" });
     }
 
-    const emailFilter = encodeURIComponent(`{Email}='${email.toLowerCase().trim()}'`);
+    const emailFilter = encodeURIComponent(`AND({Email}="${email.toLowerCase().trim()}",NOT({Role}="invite_token"))`);
     const emailCheck = await airtableAdmins(`?filterByFormula=${emailFilter}&fields[]=Email`);
     if ((emailCheck.records || []).length > 0)
       return res.status(400).json({ error: "An account with this email already exists" });
 
-    const role = isFirstAdmin ? "super_admin" : "admin";
+    const role = isFirstAdmin ? "super_admin" : "pending_approval";
     const hash = await bcrypt.hash(password, 12);
 
-    await airtableAdmins("", "POST", {
+    const created = await airtableAdmins("", "POST", {
       records: [{ fields: {
         Email:        email.toLowerCase().trim(),
         PasswordHash: hash,
@@ -630,10 +643,17 @@ app.post("/admin/auth/register", async (req, res) => {
     });
 
     console.log(`[ADMIN CREATED] ${email} as ${role}`);
-    res.json({ success: true, role, message: isFirstAdmin
-      ? "Super admin account created! You can now log in."
-      : `Admin account created for ${email}.`
-    });
+
+    if (isFirstAdmin) {
+      const record = created.records[0];
+      const token = jwt.sign(
+        { id: record.id, email: email.toLowerCase().trim(), name: name.trim(), role: "super_admin" },
+        JWT_SECRET, { expiresIn: "30d" }
+      );
+      res.json({ success: true, token, email: email.toLowerCase().trim(), name: name.trim(), role: "super_admin" });
+    } else {
+      res.json({ success: true, pending: true, message: "Application submitted! The Super Admin will review and approve your account." });
+    }
   } catch(e) {
     console.error("Register error:", e.message);
     res.status(500).json({ error: "Failed to create account: " + e.message });
@@ -652,6 +672,12 @@ app.post("/admin/auth/login", async (req, res) => {
     const record = (data.records || [])[0];
 
     if (!record)
+      return res.status(401).json({ error: "No account found with that email" });
+
+    if (record.fields.Role === "pending_approval")
+      return res.status(403).json({ error: "Your account is pending approval from the Super Admin" });
+
+    if (record.fields.Role === "invite_token")
       return res.status(401).json({ error: "No account found with that email" });
 
     const valid = await bcrypt.compare(password, record.fields.PasswordHash || "");
@@ -704,12 +730,13 @@ app.patch("/admin/profile", requireAuth, async (req, res) => {
   }
 });
 
-// List all admins (super_admin only)
+// List active admins (super_admin only — excludes pending and invite_token)
 app.get("/admin/team", requireAuth, async (req, res) => {
   if (req.admin.role !== "super_admin")
     return res.status(403).json({ error: "Super admin access required" });
   try {
-    const data = await airtableAdmins("?fields[]=Email&fields[]=DisplayName&fields[]=Role&fields[]=CreatedAt");
+    const filter = encodeURIComponent(`AND(NOT({Role}="invite_token"),NOT({Role}="pending_approval"))`);
+    const data = await airtableAdmins(`?filterByFormula=${filter}&fields[]=Email&fields[]=DisplayName&fields[]=Role&fields[]=CreatedAt`);
     res.json({ admins: (data.records || []).map(r => ({
       id:        r.id,
       email:     r.fields.Email       || "",
@@ -718,6 +745,66 @@ app.get("/admin/team", requireAuth, async (req, res) => {
       createdAt: r.fields.CreatedAt   || "",
     }))});
   } catch(e) { res.status(500).json({ error: "Failed to fetch team" }); }
+});
+
+// Get current invite link (super_admin only)
+app.get("/admin/invite-token", requireAuth, async (req, res) => {
+  if (req.admin.role !== "super_admin")
+    return res.status(403).json({ error: "Super Admin only" });
+  try {
+    const token = await getInviteToken();
+    res.json({ token, link: `https://comnground.netlify.app/admin.html?invite=${token}` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Regenerate invite link (super_admin only — old link stops working immediately)
+app.post("/admin/invite-token/regenerate", requireAuth, async (req, res) => {
+  if (req.admin.role !== "super_admin")
+    return res.status(403).json({ error: "Super Admin only" });
+  try {
+    const filter = encodeURIComponent(`{Role}="invite_token"`);
+    const data = await airtableAdmins(`?filterByFormula=${filter}&maxRecords=1`);
+    const newToken = generateToken();
+    if (data.records && data.records.length > 0) {
+      await airtableAdmins(`/${data.records[0].id}`, "PATCH", { fields: { DisplayName: newToken } });
+    } else {
+      await airtableAdmins("", "POST", { records: [{ fields: { Email: "_invite_token", DisplayName: newToken, Role: "invite_token" } }] });
+    }
+    res.json({ token: newToken, link: `https://comnground.netlify.app/admin.html?invite=${newToken}` });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// List pending admin applications (super_admin only)
+app.get("/admin/pending-admins", requireAuth, async (req, res) => {
+  if (req.admin.role !== "super_admin")
+    return res.status(403).json({ error: "Super Admin only" });
+  try {
+    const filter = encodeURIComponent(`{Role}="pending_approval"`);
+    const data = await airtableAdmins(`?filterByFormula=${filter}&fields[]=Email&fields[]=DisplayName&fields[]=CreatedAt`);
+    res.json({ admins: (data.records || []).map(r => ({ id: r.id, email: r.fields.Email || "", name: r.fields.DisplayName || "", appliedAt: r.fields.CreatedAt || "" })) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approve a pending admin (super_admin only)
+app.post("/admin/pending-admins/:id/approve", requireAuth, async (req, res) => {
+  if (req.admin.role !== "super_admin")
+    return res.status(403).json({ error: "Super Admin only" });
+  try {
+    await airtableAdmins(`/${req.params.id}`, "PATCH", { fields: { Role: "admin" } });
+    console.log(`[ADMIN APPROVED] ${req.params.id} by ${req.admin.email}`);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Reject a pending admin — deletes the record (super_admin only)
+app.delete("/admin/pending-admins/:id", requireAuth, async (req, res) => {
+  if (req.admin.role !== "super_admin")
+    return res.status(403).json({ error: "Super Admin only" });
+  try {
+    await airtableAdmins(`/${req.params.id}`, "DELETE");
+    console.log(`[ADMIN REJECTED] ${req.params.id} by ${req.admin.email}`);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── ADMIN EVENTS ──────────────────────────────────────────────────────────────
