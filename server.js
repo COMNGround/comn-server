@@ -16,6 +16,11 @@ const AT_HEADS = {
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
+// Today's date in YYYY-MM-DD for filtering upcoming events
+function today() {
+  return new Date().toISOString().split("T")[0];
+}
+
 async function airtable(path, method = "GET", body = null) {
   const opts = { method, headers: AT_HEADS };
   if (body) opts.body = JSON.stringify(body);
@@ -30,11 +35,12 @@ app.get("/", (req, res) => {
   res.json({ status: "COMN server running", nextScrape: "Daily 12 PM CT" });
 });
 
-// GET live events for public map
+// GET upcoming live events for public map (today and future only)
 app.get("/events", async (req, res) => {
   try {
+    const filter = encodeURIComponent(`AND({Status}='live', {Date}>='${today()}')`);
     const data = await airtable(
-      `?filterByFormula=SEARCH('live',+{Status})&sort[0][field]=Date&sort[0][direction]=asc`
+      `?filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`
     );
     const events = (data.records || []).map(r => ({
       id:      r.id,
@@ -58,19 +64,21 @@ app.get("/events", async (req, res) => {
 // GET pending count for admin dot
 app.get("/pending-count", async (req, res) => {
   try {
-    const data = await airtable(`?filterByFormula=SEARCH('pending',+{Status})`);
+    const filter = encodeURIComponent(`{Status}='pending'`);
+    const data = await airtable(`?filterByFormula=${filter}`);
     res.json({ count: (data.records || []).length });
   } catch (e) {
     res.status(500).json({ count: 0 });
   }
 });
 
-// GET admin events by status
+// GET admin events by status (all dates for admin)
 app.get("/admin/events", async (req, res) => {
   try {
     const status = req.query.status || "pending";
+    const filter = encodeURIComponent(`{Status}='${status}'`);
     const data = await airtable(
-      `?filterByFormula=SEARCH('${status}',+{Status})&sort[0][field]=Date&sort[0][direction]=asc`
+      `?filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`
     );
     res.json({ records: data.records || [] });
   } catch (e) {
