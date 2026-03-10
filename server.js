@@ -1,17 +1,23 @@
 const express = require("express");
 const cors    = require("cors");
+const bcrypt  = require("bcryptjs");
+const jwt     = require("jsonwebtoken");
 
 const app  = express();
 const PORT = process.env.PORT || 8080;
 
 const AT_TOKEN = process.env.AT_TOKEN;
 const AT_BASE  = process.env.AT_BASE;
-const AT_TABLE = "Events";
-const AT_URL   = `https://api.airtable.com/v0/${AT_BASE}/${AT_TABLE}`;
+const AT_TABLE        = "Events";
+const AT_ADMINS_TABLE = "Admins";
+const AT_URL        = `https://api.airtable.com/v0/${AT_BASE}/${AT_TABLE}`;
+const AT_ADMINS_URL = `https://api.airtable.com/v0/${AT_BASE}/${AT_ADMINS_TABLE}`;
 const AT_HEADS = { "Authorization": `Bearer ${AT_TOKEN}`, "Content-Type": "application/json" };
+
 const RESEND_KEY   = process.env.RESEND_KEY;
 const DIGEST_EMAIL = process.env.DIGEST_EMAIL || "bywilliamcole@gmail.com";
 const ADMIN_URL    = "https://comnground.netlify.app/admin.html";
+const JWT_SECRET   = process.env.JWT_SECRET || "comn-dev-jwt-secret-CHANGE-IN-PROD";
 
 app.use(cors({ origin: "*" }));
 app.use(express.json());
@@ -23,21 +29,55 @@ function threeMonthsFromNow() {
   d.setMonth(d.getMonth() + 3);
   return d.toISOString().split("T")[0];
 }
-// Only pull events from today through 3 months out — keeps the list relevant
 function inWindow(d) { return d && d >= today() && d <= threeMonthsFromNow(); }
-function inFuture(d) { return d && d >= today(); } // kept for voting/council which may look further
+function inFuture(d) { return d && d >= today(); }
 
-// ── AIRTABLE HELPER ──────────────────────────────────────────────────────────
-async function airtable(path, method = "GET", body = null) {
+// ── AIRTABLE HELPERS ──────────────────────────────────────────────────────────
+// NEW optional fields that may not exist in Airtable yet — auto-stripped on error
+const OPTIONAL_FIELDS = ["DuplicateOf", "RejectedBy", "Approvers"];
+
+async function airtable(path, method = "GET", body = null, _retry = true) {
   const opts = { method, headers: AT_HEADS };
   if (body) opts.body = JSON.stringify(body);
   const res  = await fetch(`${AT_URL}${path}`, opts);
+  const data = await res.json();
+  if (!res.ok) {
+    // If a new optional field doesn't exist in Airtable yet, retry without it
+    if (_retry && data?.error?.type === "UNKNOWN_FIELD_NAME" && body) {
+      console.warn(`[Airtable] Field not found — retrying without optional fields`);
+      const stripped = JSON.parse(JSON.stringify(body));
+      const strip = f => { if (f) OPTIONAL_FIELDS.forEach(k => delete f[k]); };
+      if (stripped.records) stripped.records.forEach(r => strip(r.fields));
+      else if (stripped.fields) strip(stripped.fields);
+      return await airtable(path, method, stripped, false);
+    }
+    throw new Error(JSON.stringify(data));
+  }
+  return data;
+}
+
+async function airtableAdmins(path, method = "GET", body = null) {
+  const opts = { method, headers: AT_HEADS };
+  if (body) opts.body = JSON.stringify(body);
+  const res  = await fetch(`${AT_ADMINS_URL}${path}`, opts);
   const data = await res.json();
   if (!res.ok) throw new Error(JSON.stringify(data));
   return data;
 }
 
-// ── SCRAPER ──────────────────────────────────────────────────────────────────
+// ── AUTH MIDDLEWARE ───────────────────────────────────────────────────────────
+function requireAuth(req, res, next) {
+  const token = (req.headers.authorization || "").replace("Bearer ", "").trim();
+  if (!token) return res.status(401).json({ error: "Login required" });
+  try {
+    req.admin = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch(e) {
+    res.status(401).json({ error: "Session expired — please log in again" });
+  }
+}
+
+// ── SCRAPER HELPERS ───────────────────────────────────────────────────────────
 async function fetchHTML(url) {
   try {
     const res = await fetch(url, {
@@ -58,7 +98,8 @@ function parseDate(str) {
   return null;
 }
 
-// Austin City Council meetings
+// ── SCRAPERS ──────────────────────────────────────────────────────────────────
+
 async function scrapeCouncil() {
   const html = await fetchHTML("https://www.austintexas.gov/department/city-council/2026/2026_council_index.htm");
   if (!html) return [];
@@ -75,14 +116,13 @@ async function scrapeCouncil() {
       type: "townhall", date, time: "10:00",
       address: "Austin City Hall, 301 W. Second Street, Austin, TX",
       lat: 30.2636, lng: -97.7466,
-      desc: "Public comment open in-person or by phone. Register to speak at austintexas.gov.",
+      desc: "Regular public meeting of the Austin City Council. Public comment is open — register to speak in-person or by phone at austintexas.gov before the meeting.",
       source: "https://www.austintexas.gov/department/city-council/2026/2026_council_index.htm",
     });
   }
   return events;
 }
 
-// Travis County elections / voting
 async function scrapeVoting() {
   const html = await fetchHTML("https://votetravis.gov/current-election-information/");
   if (!html) return [];
@@ -99,14 +139,13 @@ async function scrapeVoting() {
       type: "voting", date, time: "07:00",
       address: "Any Travis County Vote Center",
       lat: 30.2672, lng: -97.7431,
-      desc: "Vote at any Travis County Vote Center 7 AM – 7 PM. Bring valid TX photo ID.",
+      desc: "Vote at any Travis County Vote Center 7 AM – 7 PM. Bring a valid Texas photo ID. Find your nearest location at votetravis.gov.",
       source: "https://votetravis.gov/current-election-information/",
     });
   }
   return events;
 }
 
-// Mobilize.us public API — Austin civic events
 async function scrapeMobilize() {
   try {
     const res = await fetch(
@@ -129,7 +168,7 @@ async function scrapeMobilize() {
           address: isVirtual ? "Online" : (e.location?.venue || e.location?.address_lines?.[0] || "Austin, TX"),
           lat: isVirtual ? 0 : (parseFloat(e.location?.lat) || 30.2672),
           lng: isVirtual ? 0 : (parseFloat(e.location?.lon) || -97.7431),
-          desc: (e.description || "").replace(/<[^>]*>/g,"").slice(0,200),
+          desc: (e.description || "").replace(/<[^>]*>/g,"").slice(0,250),
           source: e.browser_url || "",
         };
       })
@@ -137,11 +176,10 @@ async function scrapeMobilize() {
   } catch(e) { console.warn("Mobilize scrape failed:", e.message); return []; }
 }
 
-// Hands Off Central TX — uses Squarespace JSON API, then JSON-LD, then HTML fallback
 async function scrapeHandsOff() {
   const BASE = "https://www.handsoffcentraltx.org";
 
-  // ── METHOD 1: Squarespace JSON API (most reliable, returns structured data) ─
+  // METHOD 1: Squarespace JSON API
   try {
     const res = await fetch(`${BASE}/events?format=json`, {
       headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.netlify.app)" },
@@ -152,7 +190,6 @@ async function scrapeHandsOff() {
       const items = data.items || data.upcomingEvents || [];
       const events = [];
       for (const item of items) {
-        // Squarespace stores dates as milliseconds or ISO string
         const startMs = item.startDate;
         if (!startMs) continue;
         const d = new Date(typeof startMs === "number" ? startMs : startMs);
@@ -163,16 +200,14 @@ async function scrapeHandsOff() {
           || item.location?.mapWidget?.mapAddress
           || item.location?.name
           || "Austin, TX (see source for location)";
-        // Strip HTML tags from description/excerpt
         const rawDesc = (item.excerpt || item.body || item.description || "").replace(/<[^>]*>/g,"").trim();
-        const desc = rawDesc.slice(0, 250) || "Community civic event from Hands Off Central TX. See source link for full details.";
         events.push({
           name: (item.title || "Hands Off Central TX Event").slice(0, 100),
           type: "protest", date, time: time || "13:00",
           address: loc,
           lat: parseFloat(item.location?.markerLat) || 30.2747,
           lng: parseFloat(item.location?.markerLng) || -97.7403,
-          desc,
+          desc: rawDesc.slice(0, 250) || "Community civic event from Hands Off Central TX. See source link for full details.",
           source: item.fullUrl ? `${BASE}${item.fullUrl}` : `${BASE}/events`,
         });
       }
@@ -183,7 +218,7 @@ async function scrapeHandsOff() {
     }
   } catch(e) { console.warn("HandsOff Squarespace API failed:", e.message); }
 
-  // ── METHOD 2: JSON-LD structured data embedded in the HTML page ─────────────
+  // METHOD 2: JSON-LD structured data
   const html = await fetchHTML(`${BASE}/events`);
   if (!html) return [];
   const events = [];
@@ -212,7 +247,7 @@ async function scrapeHandsOff() {
         address: loc,
         lat: parseFloat(ev.location?.geo?.latitude) || 30.2747,
         lng: parseFloat(ev.location?.geo?.longitude) || -97.7403,
-        desc: rawDesc.slice(0, 250) || "Community civic event from Hands Off Central TX. See source link for full details.",
+        desc: rawDesc.slice(0, 250) || "Community civic event. See source for full details.",
         source: ev.url || `${BASE}/events`,
       });
     }
@@ -222,8 +257,7 @@ async function scrapeHandsOff() {
     }
   }
 
-  // ── METHOD 3: HTML fallback — parses event links, skips ALL navigation items ─
-  // Known UI strings that are NOT event names (mobile nav buttons, menu toggles, etc.)
+  // METHOD 3: HTML fallback — skips ALL navigation/UI items
   const UI_STRINGS = new Set([
     "open menu", "close menu", "open", "close", "menu", "toggle menu",
     "navigation", "nav", "skip to content", "back to top",
@@ -249,7 +283,6 @@ async function scrapeHandsOff() {
     seen.add(slug);
     const rawName = lm[3].replace(/<[^>]*>/g,"").trim();
     if (!rawName || rawName.length < 4) continue;
-    // Skip any UI navigation strings masquerading as event names
     if (UI_STRINGS.has(rawName.toLowerCase())) continue;
     events.push({
       name: rawName.replace(/&amp;/g,"&").replace(/&#\d+;/g,"").slice(0,100),
@@ -264,8 +297,6 @@ async function scrapeHandsOff() {
   return events;
 }
 
-
-// Austin Justice Coalition
 async function scrapeAJC() {
   const html = await fetchHTML("https://austinjustice.org/events/");
   if (!html) return [];
@@ -286,14 +317,13 @@ async function scrapeAJC() {
       type: "nonprofit", date: dates[i], time: "18:00",
       address: "Austin, TX (see source for location)",
       lat: 30.2620, lng: -97.7213,
-      desc: "Event from Austin Justice Coalition. Verify details at source.",
+      desc: "Event from Austin Justice Coalition. Verify exact location and time at the source link before approving.",
       source: "https://austinjustice.org/events/",
     });
   }
   return events;
 }
 
-// League of Women Voters Austin
 async function scrapeLWV() {
   const html = await fetchHTML("https://lwvaustin.org/events/");
   if (!html) return [];
@@ -310,53 +340,81 @@ async function scrapeLWV() {
       type: "nonprofit", date, time: "10:00",
       address: "Austin, TX (see source for location)",
       lat: 30.2676, lng: -97.7521,
-      desc: "Civic event from LWV Austin. May include voter registration, candidate forums, or community education.",
+      desc: "Civic event from LWV Austin. May include voter registration drives, candidate forums, or civic education sessions. Check the source for full details.",
       source: "https://lwvaustin.org/events/",
     });
   }
   return events.slice(0, 5);
 }
 
-// ── DEDUPLICATION ────────────────────────────────────────────────────────────
-async function getExistingKeys() {
-  try {
-    const filter = encodeURIComponent(`NOT({Status}='rejected')`);
-    const data = await airtable(`?filterByFormula=${filter}&fields[]=Name&fields[]=Date&fields[]=Source`);
-    return new Set(
-      (data.records || []).map(r =>
-        `${(r.fields.Name||"").toLowerCase().trim()}__${r.fields.Date||""}`
-      )
-    );
-  } catch(e) { console.warn("Dedup fetch failed:", e.message); return new Set(); }
+// ── DEDUPLICATION ─────────────────────────────────────────────────────────────
+function normalizeForDedup(name) {
+  return (name || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
 }
 
-// ── SAVE BATCH TO AIRTABLE ───────────────────────────────────────────────────
+function isSimilarEvent(name1, date1, name2, date2) {
+  if (!date1 || !date2 || date1 !== date2) return false;
+  const n1 = normalizeForDedup(name1);
+  const n2 = normalizeForDedup(name2);
+  if (!n1 || !n2) return false;
+  if (n1 === n2) return true;
+  if (n1.includes(n2) || n2.includes(n1)) return true;
+  // Word-overlap: 2+ significant words in common = likely same event
+  const w1 = new Set(n1.split(" ").filter(w => w.length > 3));
+  const w2 = new Set(n2.split(" ").filter(w => w.length > 3));
+  let overlap = 0;
+  for (const w of w1) if (w2.has(w)) overlap++;
+  return overlap >= 2 && overlap >= Math.min(w1.size, w2.size) * 0.6;
+}
+
+async function getExistingEventsForDedup() {
+  try {
+    const filter = encodeURIComponent(`NOT(OR({Status}='rejected',{Status}='duplicate'))`);
+    const data = await airtable(`?filterByFormula=${filter}&fields[]=Name&fields[]=Date`);
+    return (data.records || []).map(r => ({
+      id:   r.id,
+      name: r.fields.Name || "",
+      date: r.fields.Date || "",
+    }));
+  } catch(e) { console.warn("Dedup fetch failed:", e.message); return []; }
+}
+
+// ── SAVE EVENTS ───────────────────────────────────────────────────────────────
 // ⚠️  HUMAN APPROVAL REQUIRED — SAFETY RULE ⚠️
-// Events saved here are ALWAYS "pending". They will NEVER go live automatically.
-// The ONLY way an event becomes "live" is when a human admin clicks Approve
-// in the admin panel at comnground.netlify.app/admin.html
-// DO NOT change Status to anything other than "pending" here. Ever.
-async function saveEvents(events) {
+// Events are saved as "pending" or "duplicate". NEVER "live" automatically.
+// The ONLY path to "live" is a human admin approving via the admin panel.
+async function saveEvents(events, existingEventsForDedup) {
   const saved = [];
   for (let i = 0; i < events.length; i += 10) {
     const batch = events.slice(i, i + 10);
     try {
       const data = await airtable("", "POST", {
         records: batch.map(e => {
-          // SAFETY GUARD: Explicitly enforce pending status — auto-approval is forbidden
-          const status = "pending"; // This must never be changed to "live"
+          let status = "pending"; // Default — NEVER change to "live"
+          let dupOf  = "";
+          if (existingEventsForDedup) {
+            const match = existingEventsForDedup.find(ex =>
+              isSimilarEvent(ex.name, ex.date, e.name, e.date)
+            );
+            if (match) {
+              status = "duplicate";
+              dupOf  = match.id;
+              console.log(`  ⚠️ Near-duplicate: "${e.name}" (${e.date}) ~ "${match.name}"`);
+            }
+          }
           return { fields: {
             Name:        e.name,
             Type:        e.type,
             Date:        e.date,
-            Time:        e.time        || "",
-            Address:     e.address     || "",
-            Latitude:    e.lat         || 30.2672,
-            Longitude:   e.lng         || -97.7431,
-            Description: e.desc        || "",
-            Source:      e.source      || "",
-            Status:      status,        // Always "pending" — human must approve
+            Time:        e.time     || "",
+            Address:     e.address  || "",
+            Latitude:    e.lat      || 30.2672,
+            Longitude:   e.lng      || -97.7431,
+            Description: e.desc     || "",
+            Source:      e.source   || "",
+            Status:      status,     // "pending" or "duplicate" — NEVER "live"
             SubmittedBy: "COMN Auto-Scraper",
+            DuplicateOf: dupOf,
           }};
         })
       });
@@ -366,7 +424,7 @@ async function saveEvents(events) {
   return saved;
 }
 
-// ── EMAIL DIGEST ─────────────────────────────────────────────────────────────
+// ── EMAIL DIGEST ──────────────────────────────────────────────────────────────
 async function sendDigest(newCount, totalPending) {
   if (!RESEND_KEY) { console.log("No RESEND_KEY — skipping email"); return; }
   const subject = newCount > 0
@@ -388,7 +446,7 @@ async function sendDigest(newCount, totalPending) {
   } catch(e) { console.error("Email failed:", e.message); }
 }
 
-// ── MAIN SCRAPE FUNCTION ─────────────────────────────────────────────────────
+// ── MAIN SCRAPE ───────────────────────────────────────────────────────────────
 async function runScraper() {
   console.log(`[${new Date().toISOString()}] Starting scrape...`);
   try {
@@ -399,41 +457,48 @@ async function runScraper() {
     const allFound = [...council, ...voting, ...mobilize, ...handsOff, ...ajc, ...lwv];
     console.log(`Found ${allFound.length} candidate events`);
 
-    const existingKeys = await getExistingKeys();
-    const newEvents = allFound.filter(e => {
+    const existingEvents = await getExistingEventsForDedup();
+    const existingKeys = new Set(
+      existingEvents.map(e => `${normalizeForDedup(e.name)}__${e.date}`)
+    );
+
+    // Remove exact matches (already in system)
+    const candidates = allFound.filter(e => {
       if (!e.date || !e.name) return false;
-      const key = `${e.name.toLowerCase().trim()}__${e.date}`;
-      return !existingKeys.has(key);
+      return !existingKeys.has(`${normalizeForDedup(e.name)}__${e.date}`);
     });
-    console.log(`${newEvents.length} new after dedup`);
+    console.log(`${candidates.length} after exact-dedup`);
 
-    const saved = newEvents.length > 0 ? await saveEvents(newEvents) : [];
-    console.log(`Saved ${saved.length} to Airtable`);
+    // Save — near-dupes automatically get status="duplicate"
+    const saved = candidates.length > 0 ? await saveEvents(candidates, existingEvents) : [];
+    const newPending = saved.filter(r => r.fields?.Status === "pending").length;
+    const newDupes   = saved.filter(r => r.fields?.Status === "duplicate").length;
+    console.log(`Saved: ${newPending} pending, ${newDupes} duplicates flagged`);
 
-    // Get total pending count for digest
     let totalPending = 0;
     try {
-      const filter = encodeURIComponent(`{Status}='pending'`);
-      const d = await airtable(`?filterByFormula=${filter}&fields[]=Name`);
-      totalPending = (d.records || []).length;
+      const f1 = encodeURIComponent(`{Status}='pending'`);
+      const f2 = encodeURIComponent(`{Status}='pending_2nd'`);
+      const [d1, d2] = await Promise.all([
+        airtable(`?filterByFormula=${f1}&fields[]=Name`),
+        airtable(`?filterByFormula=${f2}&fields[]=Name`),
+      ]);
+      totalPending = (d1.records||[]).length + (d2.records||[]).length;
     } catch(e) {}
 
-    await sendDigest(saved.length, totalPending);
+    await sendDigest(newPending, totalPending);
     console.log(`[${new Date().toISOString()}] Scrape complete.`);
-    return { found: allFound.length, new: saved.length, totalPending };
+    return { found: allFound.length, newPending, newDupes, totalPending };
   } catch(e) {
     console.error("Scraper error:", e.message);
     return { error: e.message };
   }
 }
 
-// ── CRON: 12 PM CT = 18:00 UTC ───────────────────────────────────────────────
-// Railway supports cron via the RAILWAY_CRON_SCHEDULE env var, but we use
-// a simple setInterval check here for reliability without extra dependencies
+// ── CRON: 12 PM CT ───────────────────────────────────────────────────────────
 let lastScrapeDate = "";
 setInterval(() => {
   const now = new Date();
-  // Convert to CT (UTC-5 standard, UTC-6 daylight — use UTC-5 to be safe)
   const ctHour = (now.getUTCHours() - 5 + 24) % 24;
   const ctDate = now.toISOString().split("T")[0];
   if (ctHour === 12 && ctDate !== lastScrapeDate) {
@@ -441,12 +506,17 @@ setInterval(() => {
     console.log("⏰ 12 PM CT — running daily scrape");
     runScraper();
   }
-}, 60 * 1000); // check every minute
+}, 60 * 1000);
 
-// ── ROUTES ───────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// ROUTES
+// ══════════════════════════════════════════════════════════════════════════════
 
-app.get("/", (req, res) => res.json({ status: "COMN server running", nextScrape: "Daily 12 PM CT" }));
+app.get("/", (req, res) =>
+  res.json({ status: "COMN server running", nextScrape: "Daily 12 PM CT" })
+);
 
+// ── PUBLIC EVENTS ─────────────────────────────────────────────────────────────
 app.get("/events", async (req, res) => {
   try {
     const filter = encodeURIComponent(`AND({Status}='live',{Date}>='${today()}')`);
@@ -466,28 +536,20 @@ app.get("/events", async (req, res) => {
     res.json({ events });
   } catch(e) {
     console.error("GET /events:", e.message);
-    res.status(500).json({ error: "Failed to fetch events", detail: e.message });
+    res.status(500).json({ error: "Failed to fetch events" });
   }
 });
 
 app.get("/pending-count", async (req, res) => {
   try {
-    const filter = encodeURIComponent(`{Status}='pending'`);
-    const data = await airtable(`?filterByFormula=${filter}&fields[]=Name`);
-    res.json({ count: (data.records || []).length });
+    const f1 = encodeURIComponent(`{Status}='pending'`);
+    const f2 = encodeURIComponent(`{Status}='pending_2nd'`);
+    const [d1, d2] = await Promise.all([
+      airtable(`?filterByFormula=${f1}&fields[]=Name`),
+      airtable(`?filterByFormula=${f2}&fields[]=Name`),
+    ]);
+    res.json({ count: (d1.records||[]).length + (d2.records||[]).length });
   } catch(e) { res.status(500).json({ count: 0 }); }
-});
-
-app.get("/admin/events", async (req, res) => {
-  try {
-    const status = req.query.status || "pending";
-    const filter = encodeURIComponent(`{Status}='${status}'`);
-    const data = await airtable(`?filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`);
-    res.json({ records: data.records || [] });
-  } catch(e) {
-    console.error("GET /admin/events:", e.message);
-    res.status(500).json({ error: "Failed to fetch admin events", detail: e.message });
-  }
 });
 
 app.post("/submit", async (req, res) => {
@@ -501,8 +563,9 @@ app.post("/submit", async (req, res) => {
         Address: f.address,
         Latitude:    parseFloat(f.lat)  || 30.2672,
         Longitude:   parseFloat(f.lng)  || -97.7431,
-        Description: f.desc   || "", Source: f.source || "",
-        Status: "pending", // Always pending — human must approve before going live
+        Description: f.desc   || "",
+        Source:      f.source || "",
+        Status: "pending",
         SubmittedBy: f.submittedBy || "Public",
       }}]
     });
@@ -513,27 +576,251 @@ app.post("/submit", async (req, res) => {
   }
 });
 
-// ⚠️  This endpoint is the ONLY way an event becomes "live".
-// It requires a human to manually click Approve in the admin panel.
-// There is no automated path to "live" — all auto-scraper code uses "pending" only.
-app.patch("/admin/events/:id", async (req, res) => {
+// ── ADMIN AUTH ────────────────────────────────────────────────────────────────
+
+// Check if any admins exist (for first-time setup)
+app.get("/admin/auth/status", async (req, res) => {
   try {
-    const { status } = req.body;
-    if (!["live","rejected"].includes(status))
-      return res.status(400).json({ error: "Invalid status" });
-    // Log every approval so there's a clear audit trail
-    console.log(`[HUMAN ACTION] Event ${req.params.id} set to "${status}" via admin panel`);
-    await airtable(`/${req.params.id}`, "PATCH", { fields: { Status: status } });
+    const data = await airtableAdmins("?fields[]=Email&maxRecords=1");
+    res.json({ hasAdmins: (data.records || []).length > 0 });
+  } catch(e) {
+    res.json({ hasAdmins: false });
+  }
+});
+
+// Register (first = super_admin; subsequent requires super_admin token)
+app.post("/admin/auth/register", async (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    if (!email || !password || !name)
+      return res.status(400).json({ error: "Email, name, and password are required" });
+    if (password.length < 8)
+      return res.status(400).json({ error: "Password must be at least 8 characters" });
+
+    const existing = await airtableAdmins("?fields[]=Email");
+    const isFirstAdmin = (existing.records || []).length === 0;
+
+    if (!isFirstAdmin) {
+      const token = (req.headers.authorization || "").replace("Bearer ", "").trim();
+      if (!token) return res.status(403).json({ error: "Only a super admin can add new admins" });
+      let decoded;
+      try { decoded = jwt.verify(token, JWT_SECRET); } catch(e) {
+        return res.status(403).json({ error: "Invalid token — super admin login required" });
+      }
+      if (decoded.role !== "super_admin")
+        return res.status(403).json({ error: "Only a super admin can add new admins" });
+    }
+
+    const emailFilter = encodeURIComponent(`{Email}='${email.toLowerCase().trim()}'`);
+    const emailCheck = await airtableAdmins(`?filterByFormula=${emailFilter}&fields[]=Email`);
+    if ((emailCheck.records || []).length > 0)
+      return res.status(400).json({ error: "An account with this email already exists" });
+
+    const role = isFirstAdmin ? "super_admin" : "admin";
+    const hash = await bcrypt.hash(password, 12);
+
+    await airtableAdmins("", "POST", {
+      records: [{ fields: {
+        Email:        email.toLowerCase().trim(),
+        PasswordHash: hash,
+        DisplayName:  name.trim(),
+        Role:         role,
+        CreatedAt:    today(),
+      }}]
+    });
+
+    console.log(`[ADMIN CREATED] ${email} as ${role}`);
+    res.json({ success: true, role, message: isFirstAdmin
+      ? "Super admin account created! You can now log in."
+      : `Admin account created for ${email}.`
+    });
+  } catch(e) {
+    console.error("Register error:", e.message);
+    res.status(500).json({ error: "Failed to create account: " + e.message });
+  }
+});
+
+// Login
+app.post("/admin/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password)
+      return res.status(400).json({ error: "Email and password required" });
+
+    const filter = encodeURIComponent(`{Email}='${email.toLowerCase().trim()}'`);
+    const data = await airtableAdmins(`?filterByFormula=${filter}`);
+    const record = (data.records || [])[0];
+
+    if (!record)
+      return res.status(401).json({ error: "No account found with that email" });
+
+    const valid = await bcrypt.compare(password, record.fields.PasswordHash || "");
+    if (!valid)
+      return res.status(401).json({ error: "Incorrect password" });
+
+    const payload = {
+      id:    record.id,
+      email: record.fields.Email,
+      name:  record.fields.DisplayName || record.fields.Email,
+      role:  record.fields.Role || "admin",
+    };
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "30d" });
+    console.log(`[LOGIN] ${payload.email} (${payload.role})`);
+    res.json({ token, email: payload.email, name: payload.name, role: payload.role });
+  } catch(e) {
+    console.error("Login error:", e.message);
+    res.status(500).json({ error: "Login failed" });
+  }
+});
+
+// Get current admin's profile
+app.get("/admin/profile", requireAuth, async (req, res) => {
+  res.json({ id: req.admin.id, email: req.admin.email, name: req.admin.name, role: req.admin.role });
+});
+
+// Update name or password
+app.patch("/admin/profile", requireAuth, async (req, res) => {
+  try {
+    const { name, currentPassword, newPassword } = req.body;
+    const updates = {};
+    if (name) updates.DisplayName = name.trim();
+    if (newPassword) {
+      if (!currentPassword)
+        return res.status(400).json({ error: "Current password required to set a new one" });
+      if (newPassword.length < 8)
+        return res.status(400).json({ error: "New password must be at least 8 characters" });
+      const rec = await airtableAdmins(`/${req.admin.id}`);
+      const valid = await bcrypt.compare(currentPassword, rec.fields?.PasswordHash || "");
+      if (!valid) return res.status(401).json({ error: "Current password is incorrect" });
+      updates.PasswordHash = await bcrypt.hash(newPassword, 12);
+    }
+    if (Object.keys(updates).length === 0)
+      return res.status(400).json({ error: "Nothing to update" });
+    await airtableAdmins(`/${req.admin.id}`, "PATCH", { fields: updates });
     res.json({ success: true });
   } catch(e) {
-    console.error("PATCH:", e.message);
+    console.error("Profile update:", e.message);
+    res.status(500).json({ error: "Failed to update profile" });
+  }
+});
+
+// List all admins (super_admin only)
+app.get("/admin/team", requireAuth, async (req, res) => {
+  if (req.admin.role !== "super_admin")
+    return res.status(403).json({ error: "Super admin access required" });
+  try {
+    const data = await airtableAdmins("?fields[]=Email&fields[]=DisplayName&fields[]=Role&fields[]=CreatedAt");
+    res.json({ admins: (data.records || []).map(r => ({
+      id:        r.id,
+      email:     r.fields.Email       || "",
+      name:      r.fields.DisplayName || "",
+      role:      r.fields.Role        || "admin",
+      createdAt: r.fields.CreatedAt   || "",
+    }))});
+  } catch(e) { res.status(500).json({ error: "Failed to fetch team" }); }
+});
+
+// ── ADMIN EVENTS ──────────────────────────────────────────────────────────────
+
+app.get("/admin/events", requireAuth, async (req, res) => {
+  try {
+    const status = req.query.status || "pending";
+    const filter = encodeURIComponent(`{Status}='${status}'`);
+    const data = await airtable(`?filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`);
+    res.json({ records: data.records || [] });
+  } catch(e) {
+    console.error("GET /admin/events:", e.message);
+    res.status(500).json({ error: "Failed to fetch events" });
+  }
+});
+
+// ⚠️  THE ONLY WAY AN EVENT BECOMES "live" — requires human authentication.
+app.patch("/admin/events/:id", requireAuth, async (req, res) => {
+  try {
+    const { action } = req.body;
+    const adminEmail = req.admin.email;
+    const adminRole  = req.admin.role;
+    const eventId    = req.params.id;
+
+    if (!["approve", "reject"].includes(action))
+      return res.status(400).json({ error: "action must be 'approve' or 'reject'" });
+
+    const current = await airtable(`/${eventId}`);
+    const currentStatus    = current.fields?.Status    || "";
+    const currentApprovers = current.fields?.Approvers || "";
+
+    if (action === "reject") {
+      await airtable(`/${eventId}`, "PATCH", {
+        fields: { Status: "rejected", RejectedBy: adminEmail, Approvers: "" }
+      });
+      console.log(`[REJECTED] ${eventId} by ${adminEmail}`);
+      return res.json({ success: true, newStatus: "rejected" });
+    }
+
+    // APPROVE
+    if (adminRole === "super_admin") {
+      // Super admin: instant live — they count as the full approval chain
+      await airtable(`/${eventId}`, "PATCH", {
+        fields: { Status: "live", Approvers: `${adminEmail} (super admin)`, RejectedBy: "" }
+      });
+      console.log(`[SUPER ADMIN → LIVE] ${eventId} by ${adminEmail}`);
+      return res.json({ success: true, newStatus: "live", message: "Event is now live!" });
+    }
+
+    // Regular admin — two-step
+    if (currentStatus === "pending") {
+      await airtable(`/${eventId}`, "PATCH", {
+        fields: { Status: "pending_2nd", Approvers: adminEmail }
+      });
+      console.log(`[1ST APPROVAL] ${eventId} by ${adminEmail} — awaiting 2nd`);
+      return res.json({
+        success: true, newStatus: "pending_2nd",
+        message: "First approval done! A second admin must now approve before it goes live.",
+      });
+    }
+
+    if (currentStatus === "pending_2nd") {
+      if (currentApprovers.includes(adminEmail))
+        return res.status(400).json({
+          error: "You already gave the first approval. A different admin must give the second.",
+        });
+      const allApprovers = [currentApprovers, adminEmail].filter(Boolean).join(", ");
+      await airtable(`/${eventId}`, "PATCH", {
+        fields: { Status: "live", Approvers: allApprovers }
+      });
+      console.log(`[2ND APPROVAL → LIVE] ${eventId}. Approvers: ${allApprovers}`);
+      return res.json({ success: true, newStatus: "live", message: "Event approved and now live!" });
+    }
+
+    return res.status(400).json({ error: `Cannot approve event with status: ${currentStatus}` });
+
+  } catch(e) {
+    console.error("PATCH /admin/events/:id:", e.message);
     res.status(500).json({ error: "Failed to update event" });
   }
 });
 
-// Manual trigger — runs scrape immediately and returns result
-app.post("/admin/scrape-now", async (req, res) => {
-  res.json({ message: "Scrape started — check your email in ~60 seconds" });
+// Restore a rejected or duplicate event back to pending
+app.post("/admin/events/:id/restore", requireAuth, async (req, res) => {
+  try {
+    const current = await airtable(`/${req.params.id}`);
+    const status = current.fields?.Status || "";
+    if (!["rejected", "duplicate"].includes(status))
+      return res.status(400).json({ error: "Only rejected or duplicate events can be restored" });
+    await airtable(`/${req.params.id}`, "PATCH", {
+      fields: { Status: "pending", RejectedBy: "", DuplicateOf: "", Approvers: "" }
+    });
+    console.log(`[RESTORED] ${req.params.id} to pending by ${req.admin.email}`);
+    res.json({ success: true, newStatus: "pending" });
+  } catch(e) {
+    console.error("Restore error:", e.message);
+    res.status(500).json({ error: "Failed to restore event" });
+  }
+});
+
+// Manual scrape trigger
+app.post("/admin/scrape-now", requireAuth, async (req, res) => {
+  res.json({ message: "Scrape started — new events will appear in your queue shortly" });
   runScraper();
 });
 
