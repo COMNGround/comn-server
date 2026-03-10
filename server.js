@@ -130,33 +130,75 @@ async function scrapeMobilize() {
   } catch(e) { console.warn("Mobilize scrape failed:", e.message); return []; }
 }
 
-// Hands Off Central TX
+// Hands Off Central TX — Squarespace event page parser
 async function scrapeHandsOff() {
   const html = await fetchHTML("https://www.handsoffcentraltx.org/events");
   if (!html) return [];
   const events = [];
+
+  // Squarespace stores events in JSON inside <script type="application/ld+json">
+  const jsonBlocks = [];
+  const jsonRe = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/gi;
+  let jm;
+  while ((jm = jsonRe.exec(html)) !== null) {
+    try {
+      const parsed = JSON.parse(jm[1]);
+      const items = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of items) {
+        if (item["@type"] === "Event" || item.startDate) jsonBlocks.push(item);
+      }
+    } catch(e) {}
+  }
+
+  if (jsonBlocks.length > 0) {
+    for (const ev of jsonBlocks) {
+      const date = parseDate(ev.startDate);
+      if (!date || !inFuture(date)) continue;
+      const timeStr = ev.startDate?.includes("T") ? ev.startDate.split("T")[1]?.slice(0,5) : "13:00";
+      const loc = ev.location?.name || ev.location?.address?.streetAddress || "Austin, TX (see source for location)";
+      events.push({
+        name: (ev.name || "Hands Off Central TX Event").slice(0, 100),
+        type: "protest", date, time: timeStr || "13:00",
+        address: loc,
+        lat: parseFloat(ev.location?.geo?.latitude) || 30.2747,
+        lng: parseFloat(ev.location?.geo?.longitude) || -97.7403,
+        desc: (ev.description || "Civic event from Hands Off Central TX.").replace(/<[^>]*>/g,"").slice(0, 250),
+        source: ev.url || "https://www.handsoffcentraltx.org/events",
+      });
+    }
+    return events;
+  }
+
+  // Fallback: find event links by /events/SLUG pattern — skip nav items
+  const NAV_ITEMS = new Set(["events","about","merch","civics","alfr","mutualaid","bookclub","book-club","donate","contact","home"]);
+  const linkRe = /href="(\/events\/([a-z0-9][a-z0-9\-]+))"[^>]*>([\s\S]{0,200}?)<\/a>/gi;
   const dateRe = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
-  const nameRe = /(?:<h[23][^>]*>|class="[^"]*title[^"]*"[^>]*>)([^<]{5,80})<\//gi;
-  const names = [], dates = [];
-  let m;
-  while ((m = nameRe.exec(html)) !== null) names.push(m[1].trim());
-  while ((m = dateRe.exec(html)) !== null) {
-    const date = parseDate(m[0]);
+  const seen = new Set();
+  const dates = [];
+  let dm;
+  while ((dm = dateRe.exec(html)) !== null) {
+    const date = parseDate(dm[0]);
     if (date && inFuture(date)) dates.push(date);
   }
-  for (let i = 0; i < Math.min(names.length, dates.length, 8); i++) {
-    if (!names[i] || names[i].length < 4) continue;
+  let lm, dateIdx = 0;
+  while ((lm = linkRe.exec(html)) !== null && dateIdx < dates.length) {
+    const slug = lm[2].toLowerCase();
+    if (NAV_ITEMS.has(slug) || seen.has(slug)) continue;
+    seen.add(slug);
+    const rawName = lm[3].replace(/<[^>]*>/g,"").trim();
+    if (!rawName || rawName.length < 4) continue;
     events.push({
-      name: names[i].replace(/&amp;/g,"&").replace(/&#\d+;/g,""),
-      type: "protest", date: dates[i], time: "10:00",
-      address: "Texas State Capitol, 1100 Congress Ave, Austin, TX",
+      name: rawName.replace(/&amp;/g,"&").replace(/&#\d+;/g,"").slice(0,100),
+      type: "protest", date: dates[dateIdx++], time: "13:00",
+      address: "Austin, TX (see source for venue)",
       lat: 30.2747, lng: -97.7403,
-      desc: "Event from Hands Off Central TX. Verify details at source.",
-      source: "https://www.handsoffcentraltx.org/events",
+      desc: "Civic event from Hands Off Central TX. Verify venue and full details at source before approving.",
+      source: `https://www.handsoffcentraltx.org${lm[1]}`,
     });
   }
   return events;
 }
+
 
 // Austin Justice Coalition
 async function scrapeAJC() {
