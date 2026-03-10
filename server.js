@@ -33,11 +33,9 @@ app.get("/", (req, res) => {
 // GET live events for public map
 app.get("/events", async (req, res) => {
   try {
-    const params = new URLSearchParams({
-      filterByFormula: "{Status}='live'",
-      sort: JSON.stringify([{ field: "Date", direction: "asc" }])
-    });
-    const data = await airtable(`?${params}`);
+    const data = await airtable(
+      `?filterByFormula=SEARCH('live',+{Status})&sort[0][field]=Date&sort[0][direction]=asc`
+    );
     const events = (data.records || []).map(r => ({
       id:      r.id,
       name:    r.fields.Name        || "",
@@ -60,8 +58,7 @@ app.get("/events", async (req, res) => {
 // GET pending count for admin dot
 app.get("/pending-count", async (req, res) => {
   try {
-    const params = new URLSearchParams({ filterByFormula: "{Status}='pending'" });
-    const data = await airtable(`?${params}`);
+    const data = await airtable(`?filterByFormula=SEARCH('pending',+{Status})`);
     res.json({ count: (data.records || []).length });
   } catch (e) {
     res.status(500).json({ count: 0 });
@@ -72,11 +69,9 @@ app.get("/pending-count", async (req, res) => {
 app.get("/admin/events", async (req, res) => {
   try {
     const status = req.query.status || "pending";
-    const params = new URLSearchParams({
-      filterByFormula: `{Status}='${status}'`,
-      sort: JSON.stringify([{ field: "Date", direction: "asc" }])
-    });
-    const data = await airtable(`?${params}`);
+    const data = await airtable(
+      `?filterByFormula=SEARCH('${status}',+{Status})&sort[0][field]=Date&sort[0][direction]=asc`
+    );
     res.json({ records: data.records || [] });
   } catch (e) {
     console.error("GET /admin/events error:", e.message);
@@ -84,7 +79,7 @@ app.get("/admin/events", async (req, res) => {
   }
 });
 
-// POST submit new event (goes in as pending)
+// POST submit new event
 app.post("/submit", async (req, res) => {
   try {
     const f = req.body;
@@ -112,7 +107,7 @@ app.post("/submit", async (req, res) => {
   }
 });
 
-// PATCH event status (approve / reject / remove)
+// PATCH event status
 app.patch("/admin/events/:id", async (req, res) => {
   try {
     const { status } = req.body;
@@ -121,7 +116,7 @@ app.patch("/admin/events/:id", async (req, res) => {
     await airtable(`/${req.params.id}`, "PATCH", { fields: { Status: status } });
     res.json({ success: true });
   } catch (e) {
-    console.error("PATCH /admin/events error:", e.message);
+    console.error("PATCH error:", e.message);
     res.status(500).json({ error: "Failed to update event" });
   }
 });
