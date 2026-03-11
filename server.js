@@ -2,6 +2,7 @@ const express = require("express");
 const cors    = require("cors");
 const bcrypt  = require("bcryptjs");
 const jwt     = require("jsonwebtoken");
+const crypto  = require("crypto");
 
 const app  = express();
 const PORT = process.env.PORT || 8080;
@@ -17,11 +18,40 @@ const AT_HEADS = { "Authorization": `Bearer ${AT_TOKEN}`, "Content-Type": "appli
 const RESEND_KEY   = process.env.RESEND_KEY;
 const DIGEST_EMAIL = process.env.DIGEST_EMAIL || "bywilliamcole@gmail.com";
 const ADMIN_URL    = "https://comnground.netlify.app/admin.html";
-const JWT_SECRET   = process.env.JWT_SECRET || "comn-dev-jwt-secret-CHANGE-IN-PROD";
+const JWT_SECRET = process.env.JWT_SECRET || "comn-dev-jwt-secret-CHANGE-IN-PROD";
+if (!process.env.JWT_SECRET) console.warn("[WARN] JWT_SECRET env var not set ‚Äî using insecure default. Set it in Railway before going to production.");
 
 function generateToken() {
-  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return crypto.randomBytes(32).toString("hex");
 }
+
+// ‚îÄ‚îÄ RATE LIMITING (in-memory, no extra deps) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+const rateLimitStore = new Map();
+function rateLimit(key, maxPerMinute) {
+  const now = Date.now(), windowMs = 60 * 1000;
+  const rec = rateLimitStore.get(key) || { count: 0, resetAt: now + windowMs };
+  if (now > rec.resetAt) { rec.count = 0; rec.resetAt = now + windowMs; }
+  rec.count++;
+  rateLimitStore.set(key, rec);
+  return rec.count > maxPerMinute;
+}
+setInterval(() => { const now = Date.now(); rateLimitStore.forEach((v,k) => { if (now > v.resetAt) rateLimitStore.delete(k); }); }, 5 * 60 * 1000);
+
+// ‚îÄ‚îÄ LOGIN LOCKOUT ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+const loginAttempts = new Map(); // email -> { count, lockedUntil }
+function checkLoginLockout(email) {
+  const rec = loginAttempts.get(email);
+  if (!rec) return false;
+  if (rec.lockedUntil && Date.now() < rec.lockedUntil) return true;
+  return false;
+}
+function recordLoginFailure(email) {
+  const rec = loginAttempts.get(email) || { count: 0, lockedUntil: null };
+  rec.count++;
+  if (rec.count >= 5) rec.lockedUntil = Date.now() + 15 * 60 * 1000; // lock 15 min
+  loginAttempts.set(email, rec);
+}
+function clearLoginFailures(email) { loginAttempts.delete(email); }
 
 async function getInviteToken() {
   const filter = encodeURIComponent(`{Role}="invite_token"`);
@@ -32,10 +62,37 @@ async function getInviteToken() {
   return token;
 }
 
-app.use(cors({ origin: "*" }));
+app.use(cors({ origin: ["https://comnground.netlify.app", "https://comn-server-production.up.railway.app", "http://localhost:3000", "http://localhost:8080"] }));
 app.use(express.json());
 
-// ── DATE UTILS ───────────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ CONTENT HELPERS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+const ADMIN_NOTE_PHRASES = [
+  "before approving", "check source link", "visit the source link",
+  "NOTE:", "verify this is not a duplicate", "consider rejecting",
+  "location tbd", "see source for venue", "check source for venue",
+  "full details before approving"
+];
+function hasAdminNote(desc) {
+  if (!desc) return false;
+  const d = desc.toLowerCase();
+  return ADMIN_NOTE_PHRASES.some(p => d.includes(p.toLowerCase()));
+}
+function stripAdminNotes(desc) {
+  if (!desc) return desc;
+  let s = desc;
+  ADMIN_NOTE_PHRASES.forEach(p => {
+    const re = new RegExp("[.!]?\\s*" + p.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + "[^.!]*[.!]?", "gi");
+    s = s.replace(re, "");
+  });
+  // Also strip standalone NOTE: lines
+  s = s.replace(/NOTE:[^\n]*/gi, "").replace(/\s{2,}/g, " ").trim();
+  return s || desc; // fall back to original if stripped to empty
+}
+function escHtml(str) {
+  return String(str || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+// ‚îÄ‚îÄ DATE UTILS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 function today() { return new Date().toISOString().split("T")[0]; }
 function threeMonthsFromNow() {
   const d = new Date();
@@ -45,8 +102,8 @@ function threeMonthsFromNow() {
 function inWindow(d) { return d && d >= today() && d <= threeMonthsFromNow(); }
 function inFuture(d) { return d && d >= today(); }
 
-// ── AIRTABLE HELPERS ──────────────────────────────────────────────────────────
-// NEW optional fields that may not exist in Airtable yet — auto-stripped on error
+// ‚îÄ‚îÄ AIRTABLE HELPERS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// NEW optional fields that may not exist in Airtable yet ‚Äî auto-stripped on error
 const OPTIONAL_FIELDS = ["DuplicateOf", "RejectedBy", "Approvers", "LastScraped"];
 
 async function airtable(path, method = "GET", body = null, _retry = true) {
@@ -57,7 +114,7 @@ async function airtable(path, method = "GET", body = null, _retry = true) {
   if (!res.ok) {
     // If a new optional field doesn't exist in Airtable yet, retry without it
     if (_retry && data?.error?.type === "UNKNOWN_FIELD_NAME" && body) {
-      console.warn(`[Airtable] Field not found — retrying without optional fields`);
+      console.warn(`[Airtable] Field not found ‚Äî retrying without optional fields`);
       const stripped = JSON.parse(JSON.stringify(body));
       const strip = f => { if (f) OPTIONAL_FIELDS.forEach(k => delete f[k]); };
       if (stripped.records) stripped.records.forEach(r => strip(r.fields));
@@ -78,7 +135,7 @@ async function airtableAdmins(path, method = "GET", body = null) {
   return data;
 }
 
-// ── AUTH MIDDLEWARE ───────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ AUTH MIDDLEWARE ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 function requireAuth(req, res, next) {
   const token = (req.headers.authorization || "").replace("Bearer ", "").trim();
   if (!token) return res.status(401).json({ error: "Login required" });
@@ -86,11 +143,11 @@ function requireAuth(req, res, next) {
     req.admin = jwt.verify(token, JWT_SECRET);
     next();
   } catch(e) {
-    res.status(401).json({ error: "Session expired — please log in again" });
+    res.status(401).json({ error: "Session expired ‚Äî please log in again" });
   }
 }
 
-// ── EVENT TYPE DETECTION (non-partisan, content-based) ────────────────────────
+// ‚îÄ‚îÄ EVENT TYPE DETECTION (non-partisan, content-based) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 // Type is determined by CONTENT of the event, never by which source it came from.
 function detectEventType(name, desc) {
   const text = ((name || "") + " " + (desc || "")).toLowerCase();
@@ -101,7 +158,7 @@ function detectEventType(name, desc) {
   return "nonprofit";
 }
 
-// ── SCRAPER HELPERS ───────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ SCRAPER HELPERS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 async function fetchHTML(url) {
   try {
     const res = await fetch(url, {
@@ -110,7 +167,7 @@ async function fetchHTML(url) {
     });
     if (!res.ok) return null;
     return await res.text();
-  } catch(e) { console.warn(`Fetch failed: ${url} — ${e.message}`); return null; }
+  } catch(e) { console.warn(`Fetch failed: ${url} ‚Äî ${e.message}`); return null; }
 }
 
 // Fetch an event's detail page and extract accurate info (deep-link enrichment)
@@ -170,7 +227,7 @@ function parseDate(str) {
   return null;
 }
 
-// ── SCRAPERS ──────────────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ SCRAPERS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 
 async function scrapeCouncil() {
   const html = await fetchHTML("https://www.austintexas.gov/department/city-council/2026/2026_council_index.htm");
@@ -188,7 +245,7 @@ async function scrapeCouncil() {
       type: "townhall", date, time: "10:00",
       address: "Austin City Hall, 301 W. Second Street, Austin, TX",
       lat: 30.2636, lng: -97.7466,
-      desc: "Regular public meeting of the Austin City Council. Public comment is open — register to speak in-person or by phone at austintexas.gov before the meeting.",
+      desc: "Regular public meeting of the Austin City Council. Public comment is open ‚Äî register to speak in-person or by phone at austintexas.gov before the meeting.",
       source: "https://www.austintexas.gov/department/city-council/2026/2026_council_index.htm",
     });
   }
@@ -211,7 +268,7 @@ async function scrapeVoting() {
       type: "voting", date, time: "07:00",
       address: "Any Travis County Vote Center",
       lat: 30.2672, lng: -97.7431,
-      desc: "Vote at any Travis County Vote Center 7 AM – 7 PM. Bring a valid Texas photo ID. Find your nearest location at votetravis.gov.",
+      desc: "Vote at any Travis County Vote Center 7 AM ‚Äì 7 PM. Bring a valid Texas photo ID. Find your nearest location at votetravis.gov.",
       source: "https://votetravis.gov/current-election-information/",
     });
   }
@@ -374,7 +431,7 @@ async function scrapeHandsOff() {
     }
   }
 
-  // METHOD 3: HTML fallback — skips ALL navigation/UI items
+  // METHOD 3: HTML fallback ‚Äî skips ALL navigation/UI items
   const UI_STRINGS = new Set([
     "open menu", "close menu", "open", "close", "menu", "toggle menu",
     "navigation", "nav", "skip to content", "back to top",
@@ -478,9 +535,9 @@ async function scrapeLWV() {
     if (!date || !inWindow(date) || seen.has(date)) continue;
     seen.add(date);
     events.push({
-      name: "League of Women Voters Austin — Civic Event",
+      name: "League of Women Voters Austin ‚Äî Civic Event",
       type: "nonprofit", date, time: "10:00",
-      address: "Austin, TX — see source for location",
+      address: "Austin, TX ‚Äî see source for location",
       lat: 30.2676, lng: -97.7521,
       desc: "Civic engagement event hosted by the League of Women Voters Austin chapter. See the source link for full details, location, and registration.",
       source: "https://lwvaustin.org/events/",
@@ -489,7 +546,7 @@ async function scrapeLWV() {
   return events.slice(0, 5);
 }
 
-// ── DEDUPLICATION ─────────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ DEDUPLICATION ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 function normalizeForDedup(name) {
   return (name || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
 }
@@ -522,8 +579,8 @@ async function getExistingEventsForDedup() {
   } catch(e) { console.warn("Dedup fetch failed:", e.message); return []; }
 }
 
-// ── SAVE EVENTS ───────────────────────────────────────────────────────────────
-// ⚠️  HUMAN APPROVAL REQUIRED — SAFETY RULE ⚠️
+// ‚îÄ‚îÄ SAVE EVENTS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ‚ö†Ô∏è  HUMAN APPROVAL REQUIRED ‚Äî SAFETY RULE ‚ö†Ô∏è
 // Events are saved as "pending" or "duplicate". NEVER "live" automatically.
 // The ONLY path to "live" is a human admin approving via the admin panel.
 async function saveEvents(events, existingEventsForDedup) {
@@ -537,14 +594,14 @@ async function saveEvents(events, existingEventsForDedup) {
     try {
       const data = await airtable("", "POST", {
         records: batch.map(e => {
-          let status = "pending"; // Default — NEVER change to "live"
+          let status = "pending"; // Default ‚Äî NEVER change to "live"
           let dupOf  = "";
-          // URL-based dedup (most precise — same source URL = same event)
+          // URL-based dedup (most precise ‚Äî same source URL = same event)
           if (e.source && existingUrls.has(e.source)) {
             status = "duplicate";
             const urlMatch = (existingEventsForDedup || []).find(ex => ex.source === e.source);
             dupOf = urlMatch?.id || "";
-            console.log(`  ⚠️ URL duplicate: "${e.name}" — source URL already in system`);
+            console.log(`  ‚ö†Ô∏è URL duplicate: "${e.name}" ‚Äî source URL already in system`);
           } else if (existingEventsForDedup) {
             // Fuzzy name+date dedup as fallback
             const match = existingEventsForDedup.find(ex =>
@@ -553,7 +610,7 @@ async function saveEvents(events, existingEventsForDedup) {
             if (match) {
               status = "duplicate";
               dupOf  = match.id;
-              console.log(`  ⚠️ Near-duplicate: "${e.name}" (${e.date}) ~ "${match.name}"`);
+              console.log(`  ‚ö†Ô∏è Near-duplicate: "${e.name}" (${e.date}) ~ "${match.name}"`);
             }
           }
           return { fields: {
@@ -566,7 +623,7 @@ async function saveEvents(events, existingEventsForDedup) {
             Longitude:   e.lng      || -97.7431,
             Description: e.desc     || "",
             Source:      e.source   || "",
-            Status:      status,     // "pending" or "duplicate" — NEVER "live"
+            Status:      status,     // "pending" or "duplicate" ‚Äî NEVER "live"
             SubmittedBy: "COMN Auto-Scraper",
             DuplicateOf: dupOf,
             LastScraped: new Date().toISOString(),
@@ -579,16 +636,16 @@ async function saveEvents(events, existingEventsForDedup) {
   return saved;
 }
 
-// ── EMAIL DIGEST ──────────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ EMAIL DIGEST ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 async function sendDigest(stats) {
-  if (!RESEND_KEY) { console.log("No RESEND_KEY — skipping email"); return; }
+  if (!RESEND_KEY) { console.log("No RESEND_KEY ‚Äî skipping email"); return; }
   const { newPending, totalPending, found, dupes, perSource, errors, typeCounts, reclassified } = stats;
   const dateStr = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
   const subject = newPending > 0
-    ? `COMN Daily Digest — ${newPending} new event${newPending !== 1 ? "s" : ""} pending review`
-    : "COMN Daily Digest — No new events found today";
+    ? `COMN Daily Digest ‚Äî ${newPending} new event${newPending !== 1 ? "s" : ""} pending review`
+    : "COMN Daily Digest ‚Äî No new events found today";
 
-  // Bias audit — flag if any type is >60% of new events
+  // Bias audit ‚Äî flag if any type is >60% of new events
   const totalTyped = Object.values(typeCounts || {}).reduce((a, b) => a + b, 0);
   const biasLines = totalTyped > 0
     ? Object.entries(typeCounts || {}).map(([t, c]) =>
@@ -598,40 +655,40 @@ async function sendDigest(stats) {
   const biasWarnings = [];
   for (const [t, c] of Object.entries(typeCounts || {})) {
     if (totalTyped > 4 && c / totalTyped > 0.6)
-      biasWarnings.push(`  ⚠️  "${t}" is ${Math.round(c / totalTyped * 100)}% of new events — review scraper sources`);
+      biasWarnings.push(`  ‚ö†Ô∏è  "${t}" is ${Math.round(c / totalTyped * 100)}% of new events ‚Äî review scraper sources`);
   }
   if (reclassified > 0)
-    biasWarnings.push(`  ⚠️  ${reclassified} event${reclassified > 1 ? "s" : ""} reclassified by content analysis`);
+    biasWarnings.push(`  ‚ö†Ô∏è  ${reclassified} event${reclassified > 1 ? "s" : ""} reclassified by content analysis`);
 
   // Per-source breakdown
   const sourceLines = Object.entries(perSource || {}).map(([src, count]) =>
-    `  ${src}: ${count} event${count !== 1 ? "s" : ""}${count === 0 ? " ⚠️  (0 found — possible scraping failure)" : ""}`
+    `  ${src}: ${count} event${count !== 1 ? "s" : ""}${count === 0 ? " ‚ö†Ô∏è  (0 found ‚Äî possible scraping failure)" : ""}`
   ).join("\n");
-  const errorLines = (errors || []).map(e => `  ❌ ${e}`).join("\n");
+  const errorLines = (errors || []).map(e => `  ‚ùå ${e}`).join("\n");
 
   const lines = [
-    `COMN Daily Digest — ${dateStr}`,
+    `COMN Daily Digest ‚Äî ${dateStr}`,
     "",
-    "📊 Scrape Summary",
+    "üìä Scrape Summary",
     `  Sources checked: ${Object.keys(perSource || {}).length}`,
     `  Total candidate events: ${found}`,
     `  Duplicates filtered: ${dupes}`,
     `  New events pending review: ${newPending}`,
     errors?.length > 0 ? `  Scraping errors: ${errors.length}` : null,
     "",
-    "📦 Events by Source",
+    "üì¶ Events by Source",
     sourceLines || "  (none)",
   ];
-  if (errors?.length > 0) lines.push("", "🚨 Scraping Errors", errorLines);
+  if (errors?.length > 0) lines.push("", "üö® Scraping Errors", errorLines);
   lines.push(
     "",
-    "🔍 Bias Audit",
+    "üîç Bias Audit",
     biasLines,
-    biasWarnings.length > 0 ? biasWarnings.join("\n") : "  ✅ No bias flags",
+    biasWarnings.length > 0 ? biasWarnings.join("\n") : "  ‚úÖ No bias flags",
     "",
-    `📋 Total events currently pending admin review: ${totalPending}`,
+    `üìã Total events currently pending admin review: ${totalPending}`,
     "",
-    `🔗 Review now: ${ADMIN_URL}`,
+    `üîó Review now: ${ADMIN_URL}`,
     "",
     "---",
     "COMN is committed to non-partisan, fact-based civic information.",
@@ -645,11 +702,11 @@ async function sendDigest(stats) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    console.log(`✉️  Digest sent: "${subject}"`);
+    console.log(`‚úâÔ∏è  Digest sent: "${subject}"`);
   } catch(e) { console.error("Email failed:", e.message); }
 }
 
-// ── MAIN SCRAPE ───────────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ MAIN SCRAPE ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 async function runScraper() {
   console.log(`[${new Date().toISOString()}] Starting scrape...`);
   const scrapeErrors = [];
@@ -665,7 +722,7 @@ async function runScraper() {
       return results;
     } catch(e) {
       console.error(`[${label}] scraper error:`, e.message);
-      scrapeErrors.push(`${label} — ${e.message.slice(0, 120)}`);
+      scrapeErrors.push(`${label} ‚Äî ${e.message.slice(0, 120)}`);
       perSource[label] = 0;
       return [];
     }
@@ -697,7 +754,7 @@ async function runScraper() {
     });
     console.log(`${candidates.length} after exact-dedup (${allFound.length - candidates.length} filtered)`);
 
-    // Save — near-dupes automatically get status="duplicate"
+    // Save ‚Äî near-dupes automatically get status="duplicate"
     const saved = candidates.length > 0 ? await saveEvents(candidates, existingEvents) : [];
     const newPending = saved.filter(r => r.fields?.Status === "pending").length;
     const newDupes   = saved.filter(r => r.fields?.Status === "duplicate").length;
@@ -724,7 +781,7 @@ async function runScraper() {
   }
 }
 
-// ── CRON: 12 PM CT ───────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ CRON: 12 PM CT ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 let lastScrapeDate = "";
 setInterval(() => {
   const now = new Date();
@@ -732,20 +789,20 @@ setInterval(() => {
   const ctDate = now.toISOString().split("T")[0];
   if (ctHour === 12 && ctDate !== lastScrapeDate) {
     lastScrapeDate = ctDate;
-    console.log("⏰ 12 PM CT — running daily scrape");
+    console.log("‚è∞ 12 PM CT ‚Äî running daily scrape");
     runScraper();
   }
 }, 60 * 1000);
 
-// ══════════════════════════════════════════════════════════════════════════════
+// ‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê
 // ROUTES
-// ══════════════════════════════════════════════════════════════════════════════
+// ‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê
 
 app.get("/", (req, res) =>
   res.json({ status: "COMN server running", nextScrape: "Daily 12 PM CT" })
 );
 
-// ── PUBLIC EVENTS ─────────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ PUBLIC EVENTS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 app.get("/events", async (req, res) => {
   try {
     const filter = encodeURIComponent(`AND({Status}='live',{Date}>='${today()}')`);
@@ -782,22 +839,53 @@ app.get("/pending-count", async (req, res) => {
 });
 
 app.post("/submit", async (req, res) => {
+  if (rateLimit(req.ip + "_submit", 10))
+    return res.status(429).json({ error: "Too many submissions. Please wait a minute." });
   try {
     const f = req.body;
     if (!f.name || !f.type || !f.date || !f.address)
       return res.status(400).json({ error: "Missing required fields" });
+    const validTypes = ["protest","townhall","voting","nonprofit","online"];
+    if (!validTypes.includes(f.type))
+      return res.status(400).json({ error: "Invalid event type" });
+    const submitterEmail = (f.submitterEmail || "").trim().toLowerCase();
     const data = await airtable("", "POST", {
       records: [{ fields: {
-        Name: f.name, Type: f.type, Date: f.date, Time: f.time || "",
-        Address: f.address,
+        Name: f.name.trim().slice(0, 100),
+        Type: f.type, Date: f.date, Time: f.time || "",
+        Address: (f.address||"").trim().slice(0, 200),
         Latitude:    parseFloat(f.lat)  || 30.2672,
         Longitude:   parseFloat(f.lng)  || -97.7431,
-        Description: f.desc   || "",
+        Description: (f.desc || "").trim().slice(0, 500),
         Source:      f.source || "",
         Status: "pending",
         SubmittedBy: f.submittedBy || "Public",
+        SubmitterEmail: submitterEmail,
       }}]
     });
+    // Notify admin of public submission
+    if (RESEND_KEY) {
+      const eventName = escHtml(f.name.trim().slice(0, 100));
+      sendEmail(DIGEST_EMAIL, `üì¨ New public event submitted: ${f.name.trim()}`,
+        `<p>A new civic event was submitted by a member of the public.</p>
+         <p><strong>Name:</strong> ${eventName}<br>
+         <strong>Type:</strong> ${escHtml(f.type)}<br>
+         <strong>Date:</strong> ${escHtml(f.date)}<br>
+         <strong>Address:</strong> ${escHtml(f.address||"")}<br>
+         ${submitterEmail ? `<strong>Submitter email:</strong> ${escHtml(submitterEmail)}<br>` : ""}
+         </p>
+         <p><a href="${ADMIN_URL}">Review in admin panel ‚Üí</a></p>`
+      ).catch(() => {});
+      // Confirmation to submitter
+      if (submitterEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(submitterEmail)) {
+        sendEmail(submitterEmail, `Your event "${f.name.trim()}" was submitted to COMN`,
+          `<p>Thanks for submitting to COMN ‚Äî Common Ground!</p>
+           <p>Your event <strong>${eventName}</strong> is now under review by our team. We'll notify you when it's approved or if we need more information.</p>
+           <p>Events are typically reviewed within 24 hours.</p>
+           <p style="color:#888;font-size:12px">‚Äî The COMN Team | <a href="https://comnground.netlify.app">comnground.netlify.app</a></p>`
+        ).catch(() => {});
+      }
+    }
     res.json({ success: true, id: data.records?.[0]?.id });
   } catch(e) {
     console.error("POST /submit:", e.message);
@@ -805,7 +893,7 @@ app.post("/submit", async (req, res) => {
   }
 });
 
-// ── ADMIN AUTH ────────────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ ADMIN AUTH ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 
 // Check if any real admins exist (excludes invite_token records)
 app.get("/admin/auth/status", async (req, res) => {
@@ -818,7 +906,7 @@ app.get("/admin/auth/status", async (req, res) => {
   }
 });
 
-// Register — first account = super_admin (no invite needed); others need valid invite token
+// Register ‚Äî first account = super_admin (no invite needed); others need valid invite token
 app.post("/admin/auth/register", async (req, res) => {
   try {
     const { email, password, name, inviteToken } = req.body;
@@ -837,7 +925,7 @@ app.post("/admin/auth/register", async (req, res) => {
         return res.status(403).json({ error: "An invite link is required to apply as admin" });
       const validToken = await getInviteToken();
       if (inviteToken !== validToken)
-        return res.status(403).json({ error: "Invalid or expired invite link — ask the Super Admin for a new one" });
+        return res.status(403).json({ error: "Invalid or expired invite link ‚Äî ask the Super Admin for a new one" });
     }
 
     const emailFilter = encodeURIComponent(`AND({Email}="${email.toLowerCase().trim()}",NOT({Role}="invite_token"))`);
@@ -878,35 +966,47 @@ app.post("/admin/auth/register", async (req, res) => {
 
 // Login
 app.post("/admin/auth/login", async (req, res) => {
+  if (rateLimit(req.ip + "_login", 10))
+    return res.status(429).json({ error: "Too many login attempts. Please wait a minute." });
   try {
     const { email, password } = req.body;
     if (!email || !password)
       return res.status(400).json({ error: "Email and password required" });
+    const normalEmail = email.toLowerCase().trim();
 
-    const filter = encodeURIComponent(`{Email}='${email.toLowerCase().trim()}'`);
+    // Check account lockout
+    if (checkLoginLockout(normalEmail))
+      return res.status(429).json({ error: "Account temporarily locked due to too many failed attempts. Try again in 15 minutes." });
+
+    const filter = encodeURIComponent(`{Email}='${normalEmail}'`);
     const data = await airtableAdmins(`?filterByFormula=${filter}`);
     const record = (data.records || [])[0];
 
-    if (!record)
+    if (!record) {
+      recordLoginFailure(normalEmail);
       return res.status(401).json({ error: "No account found with that email" });
-
+    }
     if (record.fields.Role === "pending_approval")
       return res.status(403).json({ error: "Your account is pending approval from the Super Admin" });
-
-    if (record.fields.Role === "invite_token")
+    if (record.fields.Role === "invite_token") {
+      recordLoginFailure(normalEmail);
       return res.status(401).json({ error: "No account found with that email" });
+    }
 
     const valid = await bcrypt.compare(password, record.fields.PasswordHash || "");
-    if (!valid)
+    if (!valid) {
+      recordLoginFailure(normalEmail);
       return res.status(401).json({ error: "Incorrect password" });
+    }
 
+    clearLoginFailures(normalEmail);
     const payload = {
       id:    record.id,
       email: record.fields.Email,
       name:  record.fields.DisplayName || record.fields.Email,
       role:  record.fields.Role || "admin",
     };
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "30d" });
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "14d" });
     console.log(`[LOGIN] ${payload.email} (${payload.role})`);
     res.json({ token, email: payload.email, name: payload.name, role: payload.role });
   } catch(e) {
@@ -946,7 +1046,7 @@ app.patch("/admin/profile", requireAuth, async (req, res) => {
   }
 });
 
-// List active admins (super_admin only — excludes pending and invite_token)
+// List active admins (super_admin only ‚Äî excludes pending and invite_token)
 app.get("/admin/team", requireAuth, async (req, res) => {
   if (req.admin.role !== "super_admin")
     return res.status(403).json({ error: "Super admin access required" });
@@ -973,7 +1073,7 @@ app.get("/admin/invite-token", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Regenerate invite link (super_admin only — old link stops working immediately)
+// Regenerate invite link (super_admin only ‚Äî old link stops working immediately)
 app.post("/admin/invite-token/regenerate", requireAuth, async (req, res) => {
   if (req.admin.role !== "super_admin")
     return res.status(403).json({ error: "Super Admin only" });
@@ -1012,7 +1112,7 @@ app.post("/admin/pending-admins/:id/approve", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Reject a pending admin — deletes the record (super_admin only)
+// Reject a pending admin ‚Äî deletes the record (super_admin only)
 app.delete("/admin/pending-admins/:id", requireAuth, async (req, res) => {
   if (req.admin.role !== "super_admin")
     return res.status(403).json({ error: "Super Admin only" });
@@ -1023,7 +1123,7 @@ app.delete("/admin/pending-admins/:id", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── ADMIN EVENTS ──────────────────────────────────────────────────────────────
+// ‚îÄ‚îÄ ADMIN EVENTS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
 
 app.get("/admin/events", requireAuth, async (req, res) => {
   try {
@@ -1037,7 +1137,7 @@ app.get("/admin/events", requireAuth, async (req, res) => {
   }
 });
 
-// ⚠️  THE ONLY WAY AN EVENT BECOMES "live" — requires human authentication.
+// ‚ö†Ô∏è  THE ONLY WAY AN EVENT BECOMES "live" ‚Äî requires human authentication.
 app.patch("/admin/events/:id", requireAuth, async (req, res) => {
   try {
     const { action } = req.body;
@@ -1053,32 +1153,60 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
     const currentApprovers = current.fields?.Approvers || "";
 
     if (action === "reject") {
+      const reason = (req.body.reason || "").trim().slice(0, 300);
       await airtable(`/${eventId}`, "PATCH", {
         fields: { Status: "rejected", RejectedBy: adminEmail, Approvers: "" }
       });
-      console.log(`[REJECTED] ${eventId} by ${adminEmail}`);
+      console.log(`[REJECTED] ${eventId} by ${adminEmail}${reason ? ` ‚Äî "${reason}"` : ""}`);
+      // Email submitter if they left an email
+      const submitterEmail = current.fields?.SubmitterEmail || "";
+      if (submitterEmail && RESEND_KEY) {
+        const evName = current.fields?.Name || "Your event";
+        await sendEmail(submitterEmail, `Update on your COMN submission: "${evName}"`,
+          `<p>Hi there,</p>
+           <p>Thank you for submitting to COMN ‚Äî Common Ground.</p>
+           <p>Unfortunately, our team was unable to approve <strong>${escHtml(evName)}</strong> at this time.</p>
+           ${reason ? `<p><strong>Reason:</strong> ${escHtml(reason)}</p>` : ""}
+           <p>You're welcome to make changes and resubmit at <a href="https://comnground.netlify.app">comnground.netlify.app</a>.</p>
+           <p style="color:#888;font-size:12px">‚Äî The COMN Team</p>`
+        ).catch(() => {});
+      }
       return res.json({ success: true, newStatus: "rejected" });
     }
 
-    // APPROVE
+    // APPROVE ‚Äî strip admin-internal notes before going live
+    const rawDesc     = current.fields?.Description || "";
+    const cleanDesc   = hasAdminNote(rawDesc) ? stripAdminNotes(rawDesc) : rawDesc;
+    const descChanged = cleanDesc !== rawDesc;
+
+    // Warn if event date is >90 days out
+    const eventDate = current.fields?.Date || "";
+    const ninetyDaysOut = new Date(); ninetyDaysOut.setDate(ninetyDaysOut.getDate() + 90);
+    const farFuture = eventDate && new Date(eventDate) > ninetyDaysOut;
+
     if (adminRole === "super_admin") {
-      // Super admin: instant live — they count as the full approval chain
-      await airtable(`/${eventId}`, "PATCH", {
-        fields: { Status: "live", Approvers: `${adminEmail} (super admin)`, RejectedBy: "" }
+      // Super admin: instant live ‚Äî they count as the full approval chain
+      const patchFields = { Status: "live", Approvers: `${adminEmail} (super admin)`, RejectedBy: "" };
+      if (descChanged) patchFields.Description = cleanDesc;
+      await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
+      console.log(`[SUPER ADMIN ‚Üí LIVE] ${eventId} by ${adminEmail}${descChanged ? " (admin notes stripped)" : ""}`);
+      return res.json({
+        success: true, newStatus: "live",
+        message: "Event is now live!" + (descChanged ? " (Admin notes were stripped from description.)" : ""),
+        farFuture,
       });
-      console.log(`[SUPER ADMIN → LIVE] ${eventId} by ${adminEmail}`);
-      return res.json({ success: true, newStatus: "live", message: "Event is now live!" });
     }
 
-    // Regular admin — two-step
+    // Regular admin ‚Äî two-step
     if (currentStatus === "pending") {
-      await airtable(`/${eventId}`, "PATCH", {
-        fields: { Status: "pending_2nd", Approvers: adminEmail }
-      });
-      console.log(`[1ST APPROVAL] ${eventId} by ${adminEmail} — awaiting 2nd`);
+      const patchFields = { Status: "pending_2nd", Approvers: adminEmail };
+      if (descChanged) patchFields.Description = cleanDesc;
+      await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
+      console.log(`[1ST APPROVAL] ${eventId} by ${adminEmail} ‚Äî awaiting 2nd`);
       return res.json({
         success: true, newStatus: "pending_2nd",
         message: "First approval done! A second admin must now approve before it goes live.",
+        farFuture,
       });
     }
 
@@ -1088,11 +1216,15 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
           error: "You already gave the first approval. A different admin must give the second.",
         });
       const allApprovers = [currentApprovers, adminEmail].filter(Boolean).join(", ");
-      await airtable(`/${eventId}`, "PATCH", {
-        fields: { Status: "live", Approvers: allApprovers }
+      const patchFields = { Status: "live", Approvers: allApprovers };
+      if (descChanged) patchFields.Description = cleanDesc;
+      await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
+      console.log(`[2ND APPROVAL ‚Üí LIVE] ${eventId}. Approvers: ${allApprovers}${descChanged ? " (admin notes stripped)" : ""}`);
+      return res.json({
+        success: true, newStatus: "live",
+        message: "Event approved and now live!" + (descChanged ? " (Admin notes were stripped from description.)" : ""),
+        farFuture,
       });
-      console.log(`[2ND APPROVAL → LIVE] ${eventId}. Approvers: ${allApprovers}`);
-      return res.json({ success: true, newStatus: "live", message: "Event approved and now live!" });
     }
 
     return res.status(400).json({ error: `Cannot approve event with status: ${currentStatus}` });
@@ -1103,15 +1235,19 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
   }
 });
 
-// Edit an event — resets status to pending, requires full 2-admin re-review
+// Edit an event ‚Äî resets status to pending (unless super_admin uses keepLive)
 app.put("/admin/events/:id", requireAuth, async (req, res) => {
   try {
-    const { name, type, date, time, address, desc, lat, lng } = req.body;
+    const { name, type, date, time, address, desc, lat, lng, keepLive } = req.body;
     if (!name || !type || !date || !address)
       return res.status(400).json({ error: "name, type, date and address are required" });
     const validTypes = ["protest", "voting", "townhall", "nonprofit", "online"];
     if (!validTypes.includes(type))
       return res.status(400).json({ error: `type must be one of: ${validTypes.join(", ")}` });
+
+    // Only super_admin may keep an event live while editing
+    const usekeepLive = keepLive && req.admin.role === "super_admin";
+
     const fields = {
       Name:        name.trim().slice(0, 100),
       Type:        type,
@@ -1121,14 +1257,18 @@ app.put("/admin/events/:id", requireAuth, async (req, res) => {
       Description: (desc || "").trim().slice(0, 500),
       Latitude:    parseFloat(lat)  || 30.2672,
       Longitude:   parseFloat(lng)  || -97.7431,
-      Status:      "pending",     // always reset to pending for full re-review
-      Approvers:   "",
+      Status:      usekeepLive ? "live" : "pending",
+      Approvers:   usekeepLive ? `${req.admin.email} (super admin edit)` : "",
       RejectedBy:  "",
       SubmittedBy: `Edited by ${req.admin.name || req.admin.email}`,
     };
     await airtable(`/${req.params.id}`, "PATCH", { fields });
-    console.log(`[EDITED] ${req.params.id} by ${req.admin.email} — returned to pending`);
-    res.json({ success: true, newStatus: "pending", message: "Event updated and sent back for re-review" });
+    const newStatus = usekeepLive ? "live" : "pending";
+    console.log(`[EDITED] ${req.params.id} by ${req.admin.email} ‚Üí ${newStatus}`);
+    res.json({
+      success: true, newStatus,
+      message: usekeepLive ? "Event updated and kept live." : "Event updated and sent back for re-review.",
+    });
   } catch(e) {
     console.error("PUT /admin/events/:id:", e.message);
     res.status(500).json({ error: "Failed to update event" });
@@ -1153,21 +1293,40 @@ app.post("/admin/events/:id/restore", requireAuth, async (req, res) => {
   }
 });
 
+// Dashboard badge counts
+app.get("/admin/stats", requireAuth, async (req, res) => {
+  try {
+    const statuses = ["pending", "pending_2nd", "live", "rejected", "duplicate"];
+    const counts = {};
+    await Promise.all(statuses.map(async s => {
+      const filter = encodeURIComponent(`{Status}='${s}'`);
+      const data = await airtable(`?filterByFormula=${filter}&fields[]=Status`);
+      counts[s] = (data.records || []).length;
+    }));
+    res.json(counts);
+  } catch(e) {
+    console.error("GET /admin/stats:", e.message);
+    res.status(500).json({ error: "Failed to fetch stats" });
+  }
+});
+
 // Manual scrape trigger
 app.post("/admin/scrape-now", requireAuth, async (req, res) => {
-  res.json({ message: "Scrape started — new events will appear in your queue shortly" });
+  res.json({ message: "Scrape started ‚Äî new events will appear in your queue shortly" });
   runScraper();
 });
 
-// ── BUG REPORTS ───────────────────────────────────────────────────────────────
-// Public endpoint — no auth required. Emails William when users report issues.
+// ‚îÄ‚îÄ BUG REPORTS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// Public endpoint ‚Äî no auth required. Emails William when users report issues.
 app.post("/bug-report", async (req, res) => {
+  if (rateLimit(req.ip + "_bug", 5))
+    return res.status(429).json({ error: "Too many reports. Please wait a minute." });
   try {
     const { what, url, email } = req.body;
     if (!what || what.trim().length < 5)
       return res.status(400).json({ error: "Please describe the issue (at least 5 characters)" });
     if (RESEND_KEY) {
-      const subject = "🐛 COMN Bug Report";
+      const subject = "üêõ COMN Bug Report";
       const lines = [
         "A user submitted a bug report via COMN:",
         "",
