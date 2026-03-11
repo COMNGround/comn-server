@@ -19,13 +19,13 @@ const RESEND_KEY   = process.env.RESEND_KEY;
 const DIGEST_EMAIL = process.env.DIGEST_EMAIL || "bywilliamcole@gmail.com";
 const ADMIN_URL    = "https://comnground.netlify.app/admin.html";
 const JWT_SECRET = process.env.JWT_SECRET || "comn-dev-jwt-secret-CHANGE-IN-PROD";
-if (!process.env.JWT_SECRET) console.warn("[WARN] JWT_SECRET env var not set ‚Äî using insecure default. Set it in Railway before going to production.");
+if (!process.env.JWT_SECRET) console.warn("[WARN] JWT_SECRET env var not set — using insecure default. Set it in Railway before going to production.");
 
 function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-// ‚îÄ‚îÄ RATE LIMITING (in-memory, no extra deps) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── RATE LIMITING (in-memory, no extra deps) ──────────────────────────────────
 const rateLimitStore = new Map();
 function rateLimit(key, maxPerMinute) {
   const now = Date.now(), windowMs = 60 * 1000;
@@ -37,7 +37,7 @@ function rateLimit(key, maxPerMinute) {
 }
 setInterval(() => { const now = Date.now(); rateLimitStore.forEach((v,k) => { if (now > v.resetAt) rateLimitStore.delete(k); }); }, 5 * 60 * 1000);
 
-// ‚îÄ‚îÄ LOGIN LOCKOUT ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── LOGIN LOCKOUT ─────────────────────────────────────────────────────────────
 const loginAttempts = new Map(); // email -> { count, lockedUntil }
 function checkLoginLockout(email) {
   const rec = loginAttempts.get(email);
@@ -65,7 +65,7 @@ async function getInviteToken() {
 app.use(cors({ origin: ["https://comnground.netlify.app", "https://comn-server-production.up.railway.app", "http://localhost:3000", "http://localhost:8080"] }));
 app.use(express.json());
 
-// ‚îÄ‚îÄ CONTENT HELPERS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── CONTENT HELPERS ───────────────────────────────────────────────────────────
 const ADMIN_NOTE_PHRASES = [
   "before approving", "check source link", "visit the source link",
   "NOTE:", "verify this is not a duplicate", "consider rejecting",
@@ -92,7 +92,7 @@ function escHtml(str) {
   return String(str || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
 
-// ‚îÄ‚îÄ DATE UTILS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── DATE UTILS ───────────────────────────────────────────────────────────────
 function today() { return new Date().toISOString().split("T")[0]; }
 function threeMonthsFromNow() {
   const d = new Date();
@@ -102,8 +102,8 @@ function threeMonthsFromNow() {
 function inWindow(d) { return d && d >= today() && d <= threeMonthsFromNow(); }
 function inFuture(d) { return d && d >= today(); }
 
-// ‚îÄ‚îÄ AIRTABLE HELPERS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-// NEW optional fields that may not exist in Airtable yet ‚Äî auto-stripped on error
+// ── AIRTABLE HELPERS ──────────────────────────────────────────────────────────
+// NEW optional fields that may not exist in Airtable yet — auto-stripped on error
 const OPTIONAL_FIELDS = ["DuplicateOf", "RejectedBy", "Approvers", "LastScraped"];
 
 async function airtable(path, method = "GET", body = null, _retry = true) {
@@ -114,7 +114,7 @@ async function airtable(path, method = "GET", body = null, _retry = true) {
   if (!res.ok) {
     // If a new optional field doesn't exist in Airtable yet, retry without it
     if (_retry && data?.error?.type === "UNKNOWN_FIELD_NAME" && body) {
-      console.warn(`[Airtable] Field not found ‚Äî retrying without optional fields`);
+      console.warn(`[Airtable] Field not found — retrying without optional fields`);
       const stripped = JSON.parse(JSON.stringify(body));
       const strip = f => { if (f) OPTIONAL_FIELDS.forEach(k => delete f[k]); };
       if (stripped.records) stripped.records.forEach(r => strip(r.fields));
@@ -135,7 +135,7 @@ async function airtableAdmins(path, method = "GET", body = null) {
   return data;
 }
 
-// ‚îÄ‚îÄ AUTH MIDDLEWARE ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── AUTH MIDDLEWARE ───────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
   const token = (req.headers.authorization || "").replace("Bearer ", "").trim();
   if (!token) return res.status(401).json({ error: "Login required" });
@@ -143,11 +143,11 @@ function requireAuth(req, res, next) {
     req.admin = jwt.verify(token, JWT_SECRET);
     next();
   } catch(e) {
-    res.status(401).json({ error: "Session expired ‚Äî please log in again" });
+    res.status(401).json({ error: "Session expired — please log in again" });
   }
 }
 
-// ‚îÄ‚îÄ EVENT TYPE DETECTION (non-partisan, content-based) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── EVENT TYPE DETECTION (non-partisan, content-based) ────────────────────────
 // Type is determined by CONTENT of the event, never by which source it came from.
 function detectEventType(name, desc) {
   const text = ((name || "") + " " + (desc || "")).toLowerCase();
@@ -158,7 +158,7 @@ function detectEventType(name, desc) {
   return "nonprofit";
 }
 
-// ‚îÄ‚îÄ SCRAPER HELPERS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── SCRAPER HELPERS ───────────────────────────────────────────────────────────
 async function fetchHTML(url) {
   try {
     const res = await fetch(url, {
@@ -167,7 +167,7 @@ async function fetchHTML(url) {
     });
     if (!res.ok) return null;
     return await res.text();
-  } catch(e) { console.warn(`Fetch failed: ${url} ‚Äî ${e.message}`); return null; }
+  } catch(e) { console.warn(`Fetch failed: ${url} — ${e.message}`); return null; }
 }
 
 // Fetch an event's detail page and extract accurate info (deep-link enrichment)
@@ -227,7 +227,7 @@ function parseDate(str) {
   return null;
 }
 
-// ‚îÄ‚îÄ SCRAPERS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── SCRAPERS ──────────────────────────────────────────────────────────────────
 
 async function scrapeCouncil() {
   const html = await fetchHTML("https://www.austintexas.gov/department/city-council/2026/2026_council_index.htm");
@@ -245,7 +245,7 @@ async function scrapeCouncil() {
       type: "townhall", date, time: "10:00",
       address: "Austin City Hall, 301 W. Second Street, Austin, TX",
       lat: 30.2636, lng: -97.7466,
-      desc: "Regular public meeting of the Austin City Council. Public comment is open ‚Äî register to speak in-person or by phone at austintexas.gov before the meeting.",
+      desc: "Regular public meeting of the Austin City Council. Public comment is open — register to speak in-person or by phone at austintexas.gov before the meeting.",
       source: "https://www.austintexas.gov/department/city-council/2026/2026_council_index.htm",
     });
   }
@@ -268,7 +268,7 @@ async function scrapeVoting() {
       type: "voting", date, time: "07:00",
       address: "Any Travis County Vote Center",
       lat: 30.2672, lng: -97.7431,
-      desc: "Vote at any Travis County Vote Center 7 AM ‚Äì 7 PM. Bring a valid Texas photo ID. Find your nearest location at votetravis.gov.",
+      desc: "Vote at any Travis County Vote Center 7 AM – 7 PM. Bring a valid Texas photo ID. Find your nearest location at votetravis.gov.",
       source: "https://votetravis.gov/current-election-information/",
     });
   }
@@ -431,7 +431,7 @@ async function scrapeHandsOff() {
     }
   }
 
-  // METHOD 3: HTML fallback ‚Äî skips ALL navigation/UI items
+  // METHOD 3: HTML fallback — skips ALL navigation/UI items
   const UI_STRINGS = new Set([
     "open menu", "close menu", "open", "close", "menu", "toggle menu",
     "navigation", "nav", "skip to content", "back to top",
@@ -535,9 +535,9 @@ async function scrapeLWV() {
     if (!date || !inWindow(date) || seen.has(date)) continue;
     seen.add(date);
     events.push({
-      name: "League of Women Voters Austin ‚Äî Civic Event",
+      name: "League of Women Voters Austin — Civic Event",
       type: "nonprofit", date, time: "10:00",
-      address: "Austin, TX ‚Äî see source for location",
+      address: "Austin, TX — see source for location",
       lat: 30.2676, lng: -97.7521,
       desc: "Civic engagement event hosted by the League of Women Voters Austin chapter. See the source link for full details, location, and registration.",
       source: "https://lwvaustin.org/events/",
@@ -546,7 +546,7 @@ async function scrapeLWV() {
   return events.slice(0, 5);
 }
 
-// ‚îÄ‚îÄ DEDUPLICATION ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── DEDUPLICATION ─────────────────────────────────────────────────────────────
 function normalizeForDedup(name) {
   return (name || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
 }
@@ -579,8 +579,8 @@ async function getExistingEventsForDedup() {
   } catch(e) { console.warn("Dedup fetch failed:", e.message); return []; }
 }
 
-// ‚îÄ‚îÄ SAVE EVENTS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-// ‚ö†Ô∏è  HUMAN APPROVAL REQUIRED ‚Äî SAFETY RULE ‚ö†Ô∏è
+// ── SAVE EVENTS ───────────────────────────────────────────────────────────────
+// ⚠️  HUMAN APPROVAL REQUIRED — SAFETY RULE ⚠️
 // Events are saved as "pending" or "duplicate". NEVER "live" automatically.
 // The ONLY path to "live" is a human admin approving via the admin panel.
 async function saveEvents(events, existingEventsForDedup) {
@@ -594,14 +594,14 @@ async function saveEvents(events, existingEventsForDedup) {
     try {
       const data = await airtable("", "POST", {
         records: batch.map(e => {
-          let status = "pending"; // Default ‚Äî NEVER change to "live"
+          let status = "pending"; // Default — NEVER change to "live"
           let dupOf  = "";
-          // URL-based dedup (most precise ‚Äî same source URL = same event)
+          // URL-based dedup (most precise — same source URL = same event)
           if (e.source && existingUrls.has(e.source)) {
             status = "duplicate";
             const urlMatch = (existingEventsForDedup || []).find(ex => ex.source === e.source);
             dupOf = urlMatch?.id || "";
-            console.log(`  ‚ö†Ô∏è URL duplicate: "${e.name}" ‚Äî source URL already in system`);
+            console.log(`  ⚠️ URL duplicate: "${e.name}" — source URL already in system`);
           } else if (existingEventsForDedup) {
             // Fuzzy name+date dedup as fallback
             const match = existingEventsForDedup.find(ex =>
@@ -610,7 +610,7 @@ async function saveEvents(events, existingEventsForDedup) {
             if (match) {
               status = "duplicate";
               dupOf  = match.id;
-              console.log(`  ‚ö†Ô∏è Near-duplicate: "${e.name}" (${e.date}) ~ "${match.name}"`);
+              console.log(`  ⚠️ Near-duplicate: "${e.name}" (${e.date}) ~ "${match.name}"`);
             }
           }
           return { fields: {
@@ -623,7 +623,7 @@ async function saveEvents(events, existingEventsForDedup) {
             Longitude:   e.lng      || -97.7431,
             Description: e.desc     || "",
             Source:      e.source   || "",
-            Status:      status,     // "pending" or "duplicate" ‚Äî NEVER "live"
+            Status:      status,     // "pending" or "duplicate" — NEVER "live"
             SubmittedBy: "COMN Auto-Scraper",
             DuplicateOf: dupOf,
             LastScraped: new Date().toISOString(),
@@ -636,16 +636,16 @@ async function saveEvents(events, existingEventsForDedup) {
   return saved;
 }
 
-// ‚îÄ‚îÄ EMAIL DIGEST ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── EMAIL DIGEST ──────────────────────────────────────────────────────────────
 async function sendDigest(stats) {
-  if (!RESEND_KEY) { console.log("No RESEND_KEY ‚Äî skipping email"); return; }
+  if (!RESEND_KEY) { console.log("No RESEND_KEY — skipping email"); return; }
   const { newPending, totalPending, found, dupes, perSource, errors, typeCounts, reclassified } = stats;
   const dateStr = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
   const subject = newPending > 0
-    ? `COMN Daily Digest ‚Äî ${newPending} new event${newPending !== 1 ? "s" : ""} pending review`
-    : "COMN Daily Digest ‚Äî No new events found today";
+    ? `COMN Daily Digest — ${newPending} new event${newPending !== 1 ? "s" : ""} pending review`
+    : "COMN Daily Digest — No new events found today";
 
-  // Bias audit ‚Äî flag if any type is >60% of new events
+  // Bias audit — flag if any type is >60% of new events
   const totalTyped = Object.values(typeCounts || {}).reduce((a, b) => a + b, 0);
   const biasLines = totalTyped > 0
     ? Object.entries(typeCounts || {}).map(([t, c]) =>
@@ -655,40 +655,40 @@ async function sendDigest(stats) {
   const biasWarnings = [];
   for (const [t, c] of Object.entries(typeCounts || {})) {
     if (totalTyped > 4 && c / totalTyped > 0.6)
-      biasWarnings.push(`  ‚ö†Ô∏è  "${t}" is ${Math.round(c / totalTyped * 100)}% of new events ‚Äî review scraper sources`);
+      biasWarnings.push(`  ⚠️  "${t}" is ${Math.round(c / totalTyped * 100)}% of new events — review scraper sources`);
   }
   if (reclassified > 0)
-    biasWarnings.push(`  ‚ö†Ô∏è  ${reclassified} event${reclassified > 1 ? "s" : ""} reclassified by content analysis`);
+    biasWarnings.push(`  ⚠️  ${reclassified} event${reclassified > 1 ? "s" : ""} reclassified by content analysis`);
 
   // Per-source breakdown
   const sourceLines = Object.entries(perSource || {}).map(([src, count]) =>
-    `  ${src}: ${count} event${count !== 1 ? "s" : ""}${count === 0 ? " ‚ö†Ô∏è  (0 found ‚Äî possible scraping failure)" : ""}`
+    `  ${src}: ${count} event${count !== 1 ? "s" : ""}${count === 0 ? " ⚠️  (0 found — possible scraping failure)" : ""}`
   ).join("\n");
-  const errorLines = (errors || []).map(e => `  ‚ùå ${e}`).join("\n");
+  const errorLines = (errors || []).map(e => `  ❌ ${e}`).join("\n");
 
   const lines = [
-    `COMN Daily Digest ‚Äî ${dateStr}`,
+    `COMN Daily Digest — ${dateStr}`,
     "",
-    "üìä Scrape Summary",
+    "📊 Scrape Summary",
     `  Sources checked: ${Object.keys(perSource || {}).length}`,
     `  Total candidate events: ${found}`,
     `  Duplicates filtered: ${dupes}`,
     `  New events pending review: ${newPending}`,
     errors?.length > 0 ? `  Scraping errors: ${errors.length}` : null,
     "",
-    "üì¶ Events by Source",
+    "📦 Events by Source",
     sourceLines || "  (none)",
   ];
-  if (errors?.length > 0) lines.push("", "üö® Scraping Errors", errorLines);
+  if (errors?.length > 0) lines.push("", "🚨 Scraping Errors", errorLines);
   lines.push(
     "",
-    "üîç Bias Audit",
+    "🔍 Bias Audit",
     biasLines,
-    biasWarnings.length > 0 ? biasWarnings.join("\n") : "  ‚úÖ No bias flags",
+    biasWarnings.length > 0 ? biasWarnings.join("\n") : "  ✅ No bias flags",
     "",
-    `üìã Total events currently pending admin review: ${totalPending}`,
+    `📋 Total events currently pending admin review: ${totalPending}`,
     "",
-    `üîó Review now: ${ADMIN_URL}`,
+    `🔗 Review now: ${ADMIN_URL}`,
     "",
     "---",
     "COMN is committed to non-partisan, fact-based civic information.",
@@ -702,11 +702,11 @@ async function sendDigest(stats) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    console.log(`‚úâÔ∏è  Digest sent: "${subject}"`);
+    console.log(`✉️  Digest sent: "${subject}"`);
   } catch(e) { console.error("Email failed:", e.message); }
 }
 
-// ‚îÄ‚îÄ MAIN SCRAPE ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── MAIN SCRAPE ───────────────────────────────────────────────────────────────
 async function runScraper() {
   console.log(`[${new Date().toISOString()}] Starting scrape...`);
   const scrapeErrors = [];
@@ -722,7 +722,7 @@ async function runScraper() {
       return results;
     } catch(e) {
       console.error(`[${label}] scraper error:`, e.message);
-      scrapeErrors.push(`${label} ‚Äî ${e.message.slice(0, 120)}`);
+      scrapeErrors.push(`${label} — ${e.message.slice(0, 120)}`);
       perSource[label] = 0;
       return [];
     }
@@ -754,7 +754,7 @@ async function runScraper() {
     });
     console.log(`${candidates.length} after exact-dedup (${allFound.length - candidates.length} filtered)`);
 
-    // Save ‚Äî near-dupes automatically get status="duplicate"
+    // Save — near-dupes automatically get status="duplicate"
     const saved = candidates.length > 0 ? await saveEvents(candidates, existingEvents) : [];
     const newPending = saved.filter(r => r.fields?.Status === "pending").length;
     const newDupes   = saved.filter(r => r.fields?.Status === "duplicate").length;
@@ -781,7 +781,7 @@ async function runScraper() {
   }
 }
 
-// ‚îÄ‚îÄ CRON: 12 PM CT ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── CRON: 12 PM CT ───────────────────────────────────────────────────────────
 let lastScrapeDate = "";
 setInterval(() => {
   const now = new Date();
@@ -789,20 +789,20 @@ setInterval(() => {
   const ctDate = now.toISOString().split("T")[0];
   if (ctHour === 12 && ctDate !== lastScrapeDate) {
     lastScrapeDate = ctDate;
-    console.log("‚è∞ 12 PM CT ‚Äî running daily scrape");
+    console.log("⏰ 12 PM CT — running daily scrape");
     runScraper();
   }
 }, 60 * 1000);
 
-// ‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê
+// ══════════════════════════════════════════════════════════════════════════════
 // ROUTES
-// ‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê‚ïê
+// ══════════════════════════════════════════════════════════════════════════════
 
 app.get("/", (req, res) =>
   res.json({ status: "COMN server running", nextScrape: "Daily 12 PM CT" })
 );
 
-// ‚îÄ‚îÄ PUBLIC EVENTS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── PUBLIC EVENTS ─────────────────────────────────────────────────────────────
 app.get("/events", async (req, res) => {
   try {
     const filter = encodeURIComponent(`AND({Status}='live',{Date}>='${today()}')`);
@@ -848,6 +848,14 @@ app.post("/submit", async (req, res) => {
     const validTypes = ["protest","townhall","voting","nonprofit","online"];
     if (!validTypes.includes(f.type))
       return res.status(400).json({ error: "Invalid event type" });
+    // Policy 9: Reject social-media-only source URLs — a primary verifiable source is required
+    const SOCIAL_DOMAINS = ["twitter.com","x.com","facebook.com","fb.com","instagram.com","tiktok.com","threads.net"];
+    const sourceUrlLower = (f.source || "").toLowerCase();
+    if (sourceUrlLower && SOCIAL_DOMAINS.some(d => sourceUrlLower.includes(d))) {
+      return res.status(400).json({
+        error: "Please provide a primary source link (official website or event page) rather than a social media URL. COMN requires a verifiable source beyond social media.",
+      });
+    }
     const submitterEmail = (f.submitterEmail || "").trim().toLowerCase();
     const data = await airtable("", "POST", {
       records: [{ fields: {
@@ -866,7 +874,7 @@ app.post("/submit", async (req, res) => {
     // Notify admin of public submission
     if (RESEND_KEY) {
       const eventName = escHtml(f.name.trim().slice(0, 100));
-      sendEmail(DIGEST_EMAIL, `üì¨ New public event submitted: ${f.name.trim()}`,
+      sendEmail(DIGEST_EMAIL, `📬 New public event submitted: ${f.name.trim()}`,
         `<p>A new civic event was submitted by a member of the public.</p>
          <p><strong>Name:</strong> ${eventName}<br>
          <strong>Type:</strong> ${escHtml(f.type)}<br>
@@ -874,15 +882,15 @@ app.post("/submit", async (req, res) => {
          <strong>Address:</strong> ${escHtml(f.address||"")}<br>
          ${submitterEmail ? `<strong>Submitter email:</strong> ${escHtml(submitterEmail)}<br>` : ""}
          </p>
-         <p><a href="${ADMIN_URL}">Review in admin panel ‚Üí</a></p>`
+         <p><a href="${ADMIN_URL}">Review in admin panel →</a></p>`
       ).catch(() => {});
       // Confirmation to submitter
       if (submitterEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(submitterEmail)) {
         sendEmail(submitterEmail, `Your event "${f.name.trim()}" was submitted to COMN`,
-          `<p>Thanks for submitting to COMN ‚Äî Common Ground!</p>
+          `<p>Thanks for submitting to COMN — Common Ground!</p>
            <p>Your event <strong>${eventName}</strong> is now under review by our team. We'll notify you when it's approved or if we need more information.</p>
            <p>Events are typically reviewed within 24 hours.</p>
-           <p style="color:#888;font-size:12px">‚Äî The COMN Team | <a href="https://comnground.netlify.app">comnground.netlify.app</a></p>`
+           <p style="color:#888;font-size:12px">— The COMN Team | <a href="https://comnground.netlify.app">comnground.netlify.app</a></p>`
         ).catch(() => {});
       }
     }
@@ -893,7 +901,7 @@ app.post("/submit", async (req, res) => {
   }
 });
 
-// ‚îÄ‚îÄ ADMIN AUTH ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── ADMIN AUTH ────────────────────────────────────────────────────────────────
 
 // Check if any real admins exist (excludes invite_token records)
 app.get("/admin/auth/status", async (req, res) => {
@@ -906,7 +914,7 @@ app.get("/admin/auth/status", async (req, res) => {
   }
 });
 
-// Register ‚Äî first account = super_admin (no invite needed); others need valid invite token
+// Register — first account = super_admin (no invite needed); others need valid invite token
 app.post("/admin/auth/register", async (req, res) => {
   try {
     const { email, password, name, inviteToken } = req.body;
@@ -925,7 +933,7 @@ app.post("/admin/auth/register", async (req, res) => {
         return res.status(403).json({ error: "An invite link is required to apply as admin" });
       const validToken = await getInviteToken();
       if (inviteToken !== validToken)
-        return res.status(403).json({ error: "Invalid or expired invite link ‚Äî ask the Super Admin for a new one" });
+        return res.status(403).json({ error: "Invalid or expired invite link — ask the Super Admin for a new one" });
     }
 
     const emailFilter = encodeURIComponent(`AND({Email}="${email.toLowerCase().trim()}",NOT({Role}="invite_token"))`);
@@ -1046,7 +1054,7 @@ app.patch("/admin/profile", requireAuth, async (req, res) => {
   }
 });
 
-// List active admins (super_admin only ‚Äî excludes pending and invite_token)
+// List active admins (super_admin only — excludes pending and invite_token)
 app.get("/admin/team", requireAuth, async (req, res) => {
   if (req.admin.role !== "super_admin")
     return res.status(403).json({ error: "Super admin access required" });
@@ -1073,7 +1081,7 @@ app.get("/admin/invite-token", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Regenerate invite link (super_admin only ‚Äî old link stops working immediately)
+// Regenerate invite link (super_admin only — old link stops working immediately)
 app.post("/admin/invite-token/regenerate", requireAuth, async (req, res) => {
   if (req.admin.role !== "super_admin")
     return res.status(403).json({ error: "Super Admin only" });
@@ -1112,7 +1120,7 @@ app.post("/admin/pending-admins/:id/approve", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Reject a pending admin ‚Äî deletes the record (super_admin only)
+// Reject a pending admin — deletes the record (super_admin only)
 app.delete("/admin/pending-admins/:id", requireAuth, async (req, res) => {
   if (req.admin.role !== "super_admin")
     return res.status(403).json({ error: "Super Admin only" });
@@ -1123,7 +1131,7 @@ app.delete("/admin/pending-admins/:id", requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ‚îÄ‚îÄ ADMIN EVENTS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ── ADMIN EVENTS ──────────────────────────────────────────────────────────────
 
 app.get("/admin/events", requireAuth, async (req, res) => {
   try {
@@ -1137,7 +1145,7 @@ app.get("/admin/events", requireAuth, async (req, res) => {
   }
 });
 
-// ‚ö†Ô∏è  THE ONLY WAY AN EVENT BECOMES "live" ‚Äî requires human authentication.
+// ⚠️  THE ONLY WAY AN EVENT BECOMES "live" — requires human authentication.
 app.patch("/admin/events/:id", requireAuth, async (req, res) => {
   try {
     const { action } = req.body;
@@ -1157,24 +1165,41 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
       await airtable(`/${eventId}`, "PATCH", {
         fields: { Status: "rejected", RejectedBy: adminEmail, Approvers: "" }
       });
-      console.log(`[REJECTED] ${eventId} by ${adminEmail}${reason ? ` ‚Äî "${reason}"` : ""}`);
+      console.log(`[REJECTED] ${eventId} by ${adminEmail}${reason ? ` — "${reason}"` : ""}`);
       // Email submitter if they left an email
       const submitterEmail = current.fields?.SubmitterEmail || "";
       if (submitterEmail && RESEND_KEY) {
         const evName = current.fields?.Name || "Your event";
         await sendEmail(submitterEmail, `Update on your COMN submission: "${evName}"`,
           `<p>Hi there,</p>
-           <p>Thank you for submitting to COMN ‚Äî Common Ground.</p>
+           <p>Thank you for submitting to COMN — Common Ground.</p>
            <p>Unfortunately, our team was unable to approve <strong>${escHtml(evName)}</strong> at this time.</p>
            ${reason ? `<p><strong>Reason:</strong> ${escHtml(reason)}</p>` : ""}
            <p>You're welcome to make changes and resubmit at <a href="https://comnground.netlify.app">comnground.netlify.app</a>.</p>
-           <p style="color:#888;font-size:12px">‚Äî The COMN Team</p>`
+           <p style="color:#888;font-size:12px">— The COMN Team</p>`
         ).catch(() => {});
       }
       return res.json({ success: true, newStatus: "rejected" });
     }
 
-    // APPROVE ‚Äî strip admin-internal notes before going live
+    // APPROVE — Policy 12: Conflict-of-interest check
+    // Admins may not approve events they submitted or events from their own organization
+    const submitterEmail = (current.fields?.SubmitterEmail || "").toLowerCase();
+    if (submitterEmail && submitterEmail === adminEmail.toLowerCase()) {
+      return res.status(403).json({
+        error: "Policy 12: You cannot approve an event you submitted yourself. Another admin must review this event.",
+      });
+    }
+    const GENERIC_DOMAINS = ["gmail.com","yahoo.com","hotmail.com","outlook.com","icloud.com","protonmail.com","me.com","aol.com","live.com","msn.com"];
+    const adminDomain     = (adminEmail.split("@")[1] || "").toLowerCase();
+    const submitterDomain = (submitterEmail.split("@")[1] || "").toLowerCase();
+    if (submitterEmail && adminDomain && submitterDomain && adminDomain === submitterDomain && !GENERIC_DOMAINS.includes(adminDomain)) {
+      return res.status(403).json({
+        error: `Policy 12: You share an organization domain (@${adminDomain}) with the event submitter. Another admin must approve this event to avoid a conflict of interest.`,
+      });
+    }
+
+    // APPROVE — strip admin-internal notes before going live
     const rawDesc     = current.fields?.Description || "";
     const cleanDesc   = hasAdminNote(rawDesc) ? stripAdminNotes(rawDesc) : rawDesc;
     const descChanged = cleanDesc !== rawDesc;
@@ -1185,11 +1210,11 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
     const farFuture = eventDate && new Date(eventDate) > ninetyDaysOut;
 
     if (adminRole === "super_admin") {
-      // Super admin: instant live ‚Äî they count as the full approval chain
+      // Super admin: instant live — they count as the full approval chain
       const patchFields = { Status: "live", Approvers: `${adminEmail} (super admin)`, RejectedBy: "" };
       if (descChanged) patchFields.Description = cleanDesc;
       await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
-      console.log(`[SUPER ADMIN ‚Üí LIVE] ${eventId} by ${adminEmail}${descChanged ? " (admin notes stripped)" : ""}`);
+      console.log(`[SUPER ADMIN → LIVE] ${eventId} by ${adminEmail}${descChanged ? " (admin notes stripped)" : ""}`);
       return res.json({
         success: true, newStatus: "live",
         message: "Event is now live!" + (descChanged ? " (Admin notes were stripped from description.)" : ""),
@@ -1197,12 +1222,12 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
       });
     }
 
-    // Regular admin ‚Äî two-step
+    // Regular admin — two-step
     if (currentStatus === "pending") {
       const patchFields = { Status: "pending_2nd", Approvers: adminEmail };
       if (descChanged) patchFields.Description = cleanDesc;
       await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
-      console.log(`[1ST APPROVAL] ${eventId} by ${adminEmail} ‚Äî awaiting 2nd`);
+      console.log(`[1ST APPROVAL] ${eventId} by ${adminEmail} — awaiting 2nd`);
       return res.json({
         success: true, newStatus: "pending_2nd",
         message: "First approval done! A second admin must now approve before it goes live.",
@@ -1219,7 +1244,7 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
       const patchFields = { Status: "live", Approvers: allApprovers };
       if (descChanged) patchFields.Description = cleanDesc;
       await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
-      console.log(`[2ND APPROVAL ‚Üí LIVE] ${eventId}. Approvers: ${allApprovers}${descChanged ? " (admin notes stripped)" : ""}`);
+      console.log(`[2ND APPROVAL → LIVE] ${eventId}. Approvers: ${allApprovers}${descChanged ? " (admin notes stripped)" : ""}`);
       return res.json({
         success: true, newStatus: "live",
         message: "Event approved and now live!" + (descChanged ? " (Admin notes were stripped from description.)" : ""),
@@ -1235,7 +1260,7 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
   }
 });
 
-// Edit an event ‚Äî resets status to pending (unless super_admin uses keepLive)
+// Edit an event — resets status to pending (unless super_admin uses keepLive)
 app.put("/admin/events/:id", requireAuth, async (req, res) => {
   try {
     const { name, type, date, time, address, desc, lat, lng, keepLive } = req.body;
@@ -1264,7 +1289,7 @@ app.put("/admin/events/:id", requireAuth, async (req, res) => {
     };
     await airtable(`/${req.params.id}`, "PATCH", { fields });
     const newStatus = usekeepLive ? "live" : "pending";
-    console.log(`[EDITED] ${req.params.id} by ${req.admin.email} ‚Üí ${newStatus}`);
+    console.log(`[EDITED] ${req.params.id} by ${req.admin.email} → ${newStatus}`);
     res.json({
       success: true, newStatus,
       message: usekeepLive ? "Event updated and kept live." : "Event updated and sent back for re-review.",
@@ -1312,12 +1337,12 @@ app.get("/admin/stats", requireAuth, async (req, res) => {
 
 // Manual scrape trigger
 app.post("/admin/scrape-now", requireAuth, async (req, res) => {
-  res.json({ message: "Scrape started ‚Äî new events will appear in your queue shortly" });
+  res.json({ message: "Scrape started — new events will appear in your queue shortly" });
   runScraper();
 });
 
-// ‚îÄ‚îÄ BUG REPORTS ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-// Public endpoint ‚Äî no auth required. Emails William when users report issues.
+// ── BUG REPORTS ───────────────────────────────────────────────────────────────
+// Public endpoint — no auth required. Emails William when users report issues.
 app.post("/bug-report", async (req, res) => {
   if (rateLimit(req.ip + "_bug", 5))
     return res.status(429).json({ error: "Too many reports. Please wait a minute." });
@@ -1326,7 +1351,7 @@ app.post("/bug-report", async (req, res) => {
     if (!what || what.trim().length < 5)
       return res.status(400).json({ error: "Please describe the issue (at least 5 characters)" });
     if (RESEND_KEY) {
-      const subject = "üêõ COMN Bug Report";
+      const subject = "🐛 COMN Bug Report";
       const lines = [
         "A user submitted a bug report via COMN:",
         "",
