@@ -47,7 +47,7 @@ function inFuture(d) { return d && d >= today(); }
 
 // ── AIRTABLE HELPERS ──────────────────────────────────────────────────────────
 // NEW optional fields that may not exist in Airtable yet — auto-stripped on error
-const OPTIONAL_FIELDS = ["DuplicateOf", "RejectedBy", "Approvers"];
+const OPTIONAL_FIELDS = ["DuplicateOf", "RejectedBy", "Approvers", "LastScraped"];
 
 async function airtable(path, method = "GET", body = null, _retry = true) {
   const opts = { method, headers: AT_HEADS };
@@ -90,6 +90,17 @@ function requireAuth(req, res, next) {
   }
 }
 
+// ── EVENT TYPE DETECTION (non-partisan, content-based) ────────────────────────
+// Type is determined by CONTENT of the event, never by which source it came from.
+function detectEventType(name, desc) {
+  const text = ((name || "") + " " + (desc || "")).toLowerCase();
+  if (/\b(election day|election|vote|voting|polls open|ballot|runoff|primary election|early voting|voter registration)\b/.test(text)) return "voting";
+  if (/\b(city council|town hall|townhall|committee meeting|public hearing|commission meeting|board meeting|city meeting)\b/.test(text)) return "townhall";
+  if (/\b(online|virtual|zoom|webinar|livestream|live stream|remote meeting)\b/.test(text)) return "online";
+  if (/\b(march|rally|protest|demonstration|strike|walkout|vigil|picket)\b/.test(text)) return "protest";
+  return "nonprofit";
+}
+
 // ── SCRAPER HELPERS ───────────────────────────────────────────────────────────
 async function fetchHTML(url) {
   try {
@@ -100,6 +111,54 @@ async function fetchHTML(url) {
     if (!res.ok) return null;
     return await res.text();
   } catch(e) { console.warn(`Fetch failed: ${url} — ${e.message}`); return null; }
+}
+
+// Fetch an event's detail page and extract accurate info (deep-link enrichment)
+async function fetchEventDetails(url) {
+  if (!url || url.endsWith("/events") || url.endsWith("/events/") || url.includes("api.mobilize.us")) return {};
+  try {
+    const html = await fetchHTML(url);
+    if (!html) return {};
+    const details = {};
+
+    // 1) Try JSON-LD structured data first (most reliable)
+    const jsonRe = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/gi;
+    let jm;
+    while ((jm = jsonRe.exec(html)) !== null) {
+      try {
+        const parsed = JSON.parse(jm[1]);
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        const ev = items.find(p => p["@type"] === "Event" || p.startDate);
+        if (!ev) continue;
+        if (ev.startDate) {
+          const d = new Date(ev.startDate);
+          if (!isNaN(d)) { details.date = d.toISOString().split("T")[0]; details.time = d.toTimeString().slice(0,5); }
+        }
+        const loc = ev.location?.address?.streetAddress || ev.location?.name;
+        if (loc && loc.length > 5 && !loc.toLowerCase().includes("see source")) details.address = loc.slice(0,200);
+        if (ev.location?.geo?.latitude)  details.lat = parseFloat(ev.location.geo.latitude);
+        if (ev.location?.geo?.longitude) details.lng = parseFloat(ev.location.geo.longitude);
+        const rawDesc = (ev.description || "").replace(/<[^>]*>/g,"").replace(/\s+/g," ").trim();
+        if (rawDesc.length > 20) details.desc = rawDesc.slice(0,250);
+        if (details.date || details.address || details.desc) break;
+      } catch(e) {}
+    }
+
+    // 2) Try OpenGraph meta tags for description if still missing
+    if (!details.desc) {
+      const ogM = html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']{20,})["']/i)
+                || html.match(/<meta[^>]+content=["']([^"']{20,})["'][^>]+property=["']og:description["']/i);
+      if (ogM) details.desc = ogM[1].replace(/\s+/g," ").trim().slice(0,250);
+    }
+
+    // 3) Try to find a street address if still missing
+    if (!details.address) {
+      const addrM = html.match(/(\d{3,5}\s+[A-Z][a-z]+(?:\s+[A-Za-z]+){0,3}(?:\s+(?:St|Ave|Blvd|Dr|Rd|Way|Ln|Ct|Pl|Loop|Pkwy|Hwy))[^<"]{0,60})/);
+      if (addrM) details.address = addrM[1].trim().slice(0,200);
+    }
+
+    return details;
+  } catch(e) { return {}; }
 }
 
 function parseDate(str) {
@@ -167,25 +226,43 @@ async function scrapeMobilize() {
     );
     if (!res.ok) return [];
     const data = await res.json();
-    return (data.data || [])
+    const base = (data.data || [])
       .filter(e => e.timeslots?.length > 0)
       .map(e => {
         const ts = e.timeslots[0];
         const date = ts?.start_date ? new Date(ts.start_date * 1000).toISOString().split("T")[0] : null;
         const time = ts?.start_date ? new Date(ts.start_date * 1000).toTimeString().slice(0,5) : "10:00";
         const isVirtual = e.is_virtual || e.location?.is_virtual;
+        const rawDesc = (e.description || "").replace(/<[^>]*>/g,"").replace(/\s+/g," ").trim();
         return {
-          name: (e.title || "Austin Civic Event").slice(0, 100),
-          type: isVirtual ? "online" : "nonprofit",
+          name: (e.title || "Austin Civic Event").slice(0,100),
+          type: "nonprofit", // will be overridden by detectEventType below
           date, time,
           address: isVirtual ? "Online" : (e.location?.venue || e.location?.address_lines?.[0] || "Austin, TX"),
           lat: isVirtual ? 0 : (parseFloat(e.location?.lat) || 30.2672),
           lng: isVirtual ? 0 : (parseFloat(e.location?.lon) || -97.7431),
-          desc: (e.description || "").replace(/<[^>]*>/g,"").slice(0,250),
+          desc: rawDesc.slice(0,250),
           source: e.browser_url || "",
         };
       })
       .filter(e => e.date && inWindow(e.date));
+
+    // Deep-link each event for accurate details
+    const enriched = [];
+    for (const ev of base) {
+      if (ev.source) {
+        const d = await fetchEventDetails(ev.source);
+        if (d.date && inWindow(d.date)) ev.date = d.date;
+        if (d.time) ev.time = d.time;
+        if (d.address && d.address.length > 5) ev.address = d.address;
+        if (d.lat) ev.lat = d.lat;
+        if (d.lng) ev.lng = d.lng;
+        if (d.desc && d.desc.length > 20) ev.desc = d.desc;
+      }
+      ev.type = detectEventType(ev.name, ev.desc);
+      if (ev.date && inWindow(ev.date)) enriched.push(ev);
+    }
+    return enriched;
   } catch(e) { console.warn("Mobilize scrape failed:", e.message); return []; }
 }
 
@@ -214,19 +291,33 @@ async function scrapeHandsOff() {
           || item.location?.name
           || "Austin, TX (see source for location)";
         const rawDesc = (item.excerpt || item.body || item.description || "").replace(/<[^>]*>/g,"").trim();
-        events.push({
-          name: (item.title || "Hands Off Central TX Event").slice(0, 100),
-          type: "protest", date, time: time || "13:00",
+          events.push({
+          name: (item.title || "Hands Off Central TX Event").slice(0,100),
+          type: "nonprofit", date, time: time || "13:00",
           address: loc,
           lat: parseFloat(item.location?.markerLat) || 30.2747,
           lng: parseFloat(item.location?.markerLng) || -97.7403,
-          desc: rawDesc.slice(0, 250) || "Community civic event from Hands Off Central TX. See source link for full details.",
+          desc: rawDesc.slice(0,250),
           source: item.fullUrl ? `${BASE}${item.fullUrl}` : `${BASE}/events`,
         });
       }
       if (events.length > 0) {
-        console.log(`HandsOff (Squarespace API): ${events.length} events`);
-        return events;
+        // Deep-link each event for full details
+        const enriched = [];
+        for (const ev of events) {
+          if (ev.source && !ev.source.endsWith("/events")) {
+            const d = await fetchEventDetails(ev.source);
+            if (d.date && inWindow(d.date)) ev.date = d.date;
+            if (d.time) ev.time = d.time;
+            if (d.address && d.address.length > 5) ev.address = d.address;
+            if (d.lat) ev.lat = d.lat; if (d.lng) ev.lng = d.lng;
+            if (d.desc && d.desc.length > 20) ev.desc = d.desc;
+          }
+          ev.type = detectEventType(ev.name, ev.desc);
+          if (ev.date && inWindow(ev.date)) enriched.push(ev);
+        }
+        console.log(`HandsOff (Squarespace API): ${enriched.length} events`);
+        return enriched;
       }
     }
   } catch(e) { console.warn("HandsOff Squarespace API failed:", e.message); }
@@ -255,18 +346,31 @@ async function scrapeHandsOff() {
       const loc = ev.location?.name || ev.location?.address?.streetAddress || "Austin, TX (see source for location)";
       const rawDesc = (ev.description || "").replace(/<[^>]*>/g,"").trim();
       events.push({
-        name: (ev.name || "Hands Off Central TX Event").slice(0, 100),
-        type: "protest", date, time: timeStr || "13:00",
+        name: (ev.name || "Hands Off Central TX Event").slice(0,100),
+        type: "nonprofit", date, time: timeStr || "13:00",
         address: loc,
         lat: parseFloat(ev.location?.geo?.latitude) || 30.2747,
         lng: parseFloat(ev.location?.geo?.longitude) || -97.7403,
-        desc: rawDesc.slice(0, 250) || "Community civic event. See source for full details.",
+        desc: rawDesc.slice(0,250),
         source: ev.url || `${BASE}/events`,
       });
     }
     if (events.length > 0) {
-      console.log(`HandsOff (JSON-LD): ${events.length} events`);
-      return events;
+      const enriched = [];
+      for (const ev of events) {
+        if (ev.source && !ev.source.endsWith("/events")) {
+          const d = await fetchEventDetails(ev.source);
+          if (d.date && inWindow(d.date)) ev.date = d.date;
+          if (d.time) ev.time = d.time;
+          if (d.address && d.address.length > 5) ev.address = d.address;
+          if (d.lat) ev.lat = d.lat; if (d.lng) ev.lng = d.lng;
+          if (d.desc && d.desc.length > 20) ev.desc = d.desc;
+        }
+        ev.type = detectEventType(ev.name, ev.desc);
+        if (ev.date && inWindow(ev.date)) enriched.push(ev);
+      }
+      console.log(`HandsOff (JSON-LD): ${enriched.length} events`);
+      return enriched;
     }
   }
 
@@ -299,42 +403,67 @@ async function scrapeHandsOff() {
     if (UI_STRINGS.has(rawName.toLowerCase())) continue;
     events.push({
       name: rawName.replace(/&amp;/g,"&").replace(/&#\d+;/g,"").slice(0,100),
-      type: "protest", date: dates[dateIdx++], time: "13:00",
-      address: "Austin, TX (see source for venue details)",
-      lat: 30.2747, lng: -97.7403,
-      desc: "Community civic event from Hands Off Central TX. Visit the source link for venue, time, and full details before approving.",
+      type: "nonprofit", date: dates[dateIdx++], time: "13:00",
+      address: "Austin, TX", lat: 30.2747, lng: -97.7403,
+      desc: "",
       source: `${BASE}${lm[1]}`,
     });
   }
-  console.log(`HandsOff (HTML fallback): ${events.length} events`);
-  return events;
+  // Deep-link each event for full details
+  const enriched = [];
+  for (const ev of events) {
+    const d = await fetchEventDetails(ev.source);
+    if (d.date && inWindow(d.date)) ev.date = d.date;
+    if (d.time) ev.time = d.time;
+    if (d.address && d.address.length > 5) ev.address = d.address;
+    if (d.lat) ev.lat = d.lat; if (d.lng) ev.lng = d.lng;
+    if (d.desc && d.desc.length > 20) ev.desc = d.desc;
+    ev.type = detectEventType(ev.name, ev.desc);
+    if (ev.date && inWindow(ev.date)) enriched.push(ev);
+  }
+  console.log(`HandsOff (HTML fallback): ${enriched.length} events`);
+  return enriched;
 }
 
 async function scrapeAJC() {
   const html = await fetchHTML("https://austinjustice.org/events/");
   if (!html) return [];
-  const events = [];
+  const base = [];
   const dateRe = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
-  const nameRe = /class="[^"]*tribe-event[^"]*"[^>]*>[\s\S]{0,100}?<a[^>]*>([^<]{5,80})<\/a/gi;
-  const names = [], dates = [];
+  const nameRe = /class="[^"]*tribe-event[^"]*"[^>]*>[\s\S]{0,100}?<a[^>]+href="([^"]+)"[^>]*>([^<]{5,80})<\/a/gi;
+  const linkRe  = /class="[^"]*tribe-event[^"]*"[^>]*>[\s\S]{0,100}?<a[^>]+href="([^"]+)"/gi;
+  const names = [], dates = [], links = [];
   let m;
-  while ((m = nameRe.exec(html)) !== null) names.push(m[1].trim());
+  while ((m = nameRe.exec(html)) !== null) { links.push(m[1]); names.push(m[2].trim()); }
   while ((m = dateRe.exec(html)) !== null) {
     const date = parseDate(m[0]);
     if (date && inWindow(date)) dates.push(date);
   }
   for (let i = 0; i < Math.min(names.length, dates.length, 8); i++) {
     if (!names[i] || names[i].length < 4) continue;
-    events.push({
+    base.push({
       name: names[i].replace(/&amp;/g,"&"),
       type: "nonprofit", date: dates[i], time: "18:00",
-      address: "Austin, TX (see source for location)",
-      lat: 30.2620, lng: -97.7213,
-      desc: "Event from Austin Justice Coalition. Verify exact location and time at the source link before approving.",
-      source: "https://austinjustice.org/events/",
+      address: "Austin, TX", lat: 30.2620, lng: -97.7213,
+      desc: "",
+      source: links[i] || "https://austinjustice.org/events/",
     });
   }
-  return events;
+  // Deep-link each event
+  const enriched = [];
+  for (const ev of base) {
+    if (ev.source && ev.source !== "https://austinjustice.org/events/") {
+      const d = await fetchEventDetails(ev.source);
+      if (d.date && inWindow(d.date)) ev.date = d.date;
+      if (d.time) ev.time = d.time;
+      if (d.address && d.address.length > 5) ev.address = d.address;
+      if (d.lat) ev.lat = d.lat; if (d.lng) ev.lng = d.lng;
+      if (d.desc && d.desc.length > 20) ev.desc = d.desc;
+    }
+    ev.type = detectEventType(ev.name, ev.desc);
+    if (ev.date && inWindow(ev.date)) enriched.push(ev);
+  }
+  return enriched;
 }
 
 async function scrapeLWV() {
@@ -349,11 +478,11 @@ async function scrapeLWV() {
     if (!date || !inWindow(date) || seen.has(date)) continue;
     seen.add(date);
     events.push({
-      name: "League of Women Voters Austin — Event",
+      name: "League of Women Voters Austin — Civic Event",
       type: "nonprofit", date, time: "10:00",
-      address: "Austin, TX (see source for location)",
+      address: "Austin, TX — see source for location",
       lat: 30.2676, lng: -97.7521,
-      desc: "Civic event from LWV Austin. May include voter registration drives, candidate forums, or civic education sessions. Check the source for full details.",
+      desc: "Civic engagement event hosted by the League of Women Voters Austin chapter. See the source link for full details, location, and registration.",
       source: "https://lwvaustin.org/events/",
     });
   }
@@ -383,11 +512,12 @@ function isSimilarEvent(name1, date1, name2, date2) {
 async function getExistingEventsForDedup() {
   try {
     const filter = encodeURIComponent(`NOT(OR({Status}='rejected',{Status}='duplicate'))`);
-    const data = await airtable(`?filterByFormula=${filter}&fields[]=Name&fields[]=Date`);
+    const data = await airtable(`?filterByFormula=${filter}&fields[]=Name&fields[]=Date&fields[]=Source`);
     return (data.records || []).map(r => ({
-      id:   r.id,
-      name: r.fields.Name || "",
-      date: r.fields.Date || "",
+      id:     r.id,
+      name:   r.fields.Name   || "",
+      date:   r.fields.Date   || "",
+      source: r.fields.Source || "",
     }));
   } catch(e) { console.warn("Dedup fetch failed:", e.message); return []; }
 }
@@ -398,6 +528,10 @@ async function getExistingEventsForDedup() {
 // The ONLY path to "live" is a human admin approving via the admin panel.
 async function saveEvents(events, existingEventsForDedup) {
   const saved = [];
+  // Build a set of existing source URLs for fast URL-based dedup
+  const existingUrls = new Set(
+    (existingEventsForDedup || []).map(e => e.source).filter(Boolean)
+  );
   for (let i = 0; i < events.length; i += 10) {
     const batch = events.slice(i, i + 10);
     try {
@@ -405,7 +539,14 @@ async function saveEvents(events, existingEventsForDedup) {
         records: batch.map(e => {
           let status = "pending"; // Default — NEVER change to "live"
           let dupOf  = "";
-          if (existingEventsForDedup) {
+          // URL-based dedup (most precise — same source URL = same event)
+          if (e.source && existingUrls.has(e.source)) {
+            status = "duplicate";
+            const urlMatch = (existingEventsForDedup || []).find(ex => ex.source === e.source);
+            dupOf = urlMatch?.id || "";
+            console.log(`  ⚠️ URL duplicate: "${e.name}" — source URL already in system`);
+          } else if (existingEventsForDedup) {
+            // Fuzzy name+date dedup as fallback
             const match = existingEventsForDedup.find(ex =>
               isSimilarEvent(ex.name, ex.date, e.name, e.date)
             );
@@ -428,6 +569,7 @@ async function saveEvents(events, existingEventsForDedup) {
             Status:      status,     // "pending" or "duplicate" — NEVER "live"
             SubmittedBy: "COMN Auto-Scraper",
             DuplicateOf: dupOf,
+            LastScraped: new Date().toISOString(),
           }};
         })
       });
@@ -438,15 +580,63 @@ async function saveEvents(events, existingEventsForDedup) {
 }
 
 // ── EMAIL DIGEST ──────────────────────────────────────────────────────────────
-async function sendDigest(newCount, totalPending) {
+async function sendDigest(stats) {
   if (!RESEND_KEY) { console.log("No RESEND_KEY — skipping email"); return; }
-  const subject = newCount > 0
-    ? `COMN Daily Digest — ${newCount} new event${newCount !== 1 ? "s" : ""} pending review`
+  const { newPending, totalPending, found, dupes, perSource, errors, typeCounts, reclassified } = stats;
+  const dateStr = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const subject = newPending > 0
+    ? `COMN Daily Digest — ${newPending} new event${newPending !== 1 ? "s" : ""} pending review`
     : "COMN Daily Digest — No new events found today";
-  const text = `${newCount > 0
-    ? `${newCount} new civic event${newCount !== 1 ? "s were" : " was"} found and added to your review queue.`
-    : "No new events were found today across your sources."
-  }\n\nTotal pending review: ${totalPending}\n\nReview and publish at:\n${ADMIN_URL}\n\n— COMN`;
+
+  // Bias audit — flag if any type is >60% of new events
+  const totalTyped = Object.values(typeCounts || {}).reduce((a, b) => a + b, 0);
+  const biasLines = totalTyped > 0
+    ? Object.entries(typeCounts || {}).map(([t, c]) =>
+        `  ${t}: ${c} event${c !== 1 ? "s" : ""} (${Math.round(c / totalTyped * 100)}%)`
+      ).join("\n")
+    : "  No new events";
+  const biasWarnings = [];
+  for (const [t, c] of Object.entries(typeCounts || {})) {
+    if (totalTyped > 4 && c / totalTyped > 0.6)
+      biasWarnings.push(`  ⚠️  "${t}" is ${Math.round(c / totalTyped * 100)}% of new events — review scraper sources`);
+  }
+  if (reclassified > 0)
+    biasWarnings.push(`  ⚠️  ${reclassified} event${reclassified > 1 ? "s" : ""} reclassified by content analysis`);
+
+  // Per-source breakdown
+  const sourceLines = Object.entries(perSource || {}).map(([src, count]) =>
+    `  ${src}: ${count} event${count !== 1 ? "s" : ""}${count === 0 ? " ⚠️  (0 found — possible scraping failure)" : ""}`
+  ).join("\n");
+  const errorLines = (errors || []).map(e => `  ❌ ${e}`).join("\n");
+
+  const lines = [
+    `COMN Daily Digest — ${dateStr}`,
+    "",
+    "📊 Scrape Summary",
+    `  Sources checked: ${Object.keys(perSource || {}).length}`,
+    `  Total candidate events: ${found}`,
+    `  Duplicates filtered: ${dupes}`,
+    `  New events pending review: ${newPending}`,
+    errors?.length > 0 ? `  Scraping errors: ${errors.length}` : null,
+    "",
+    "📦 Events by Source",
+    sourceLines || "  (none)",
+  ];
+  if (errors?.length > 0) lines.push("", "🚨 Scraping Errors", errorLines);
+  lines.push(
+    "",
+    "🔍 Bias Audit",
+    biasLines,
+    biasWarnings.length > 0 ? biasWarnings.join("\n") : "  ✅ No bias flags",
+    "",
+    `📋 Total events currently pending admin review: ${totalPending}`,
+    "",
+    `🔗 Review now: ${ADMIN_URL}`,
+    "",
+    "---",
+    "COMN is committed to non-partisan, fact-based civic information.",
+  );
+  const text = lines.filter(l => l !== null).join("\n");
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -462,10 +652,33 @@ async function sendDigest(newCount, totalPending) {
 // ── MAIN SCRAPE ───────────────────────────────────────────────────────────────
 async function runScraper() {
   console.log(`[${new Date().toISOString()}] Starting scrape...`);
+  const scrapeErrors = [];
+  const perSource = {};
+  const typeCounts = {};
+
+  // Wrap each scraper with per-source error tracking
+  async function runSource(label, fn) {
+    try {
+      const results = await fn();
+      perSource[label] = results.length;
+      for (const e of results) typeCounts[e.type] = (typeCounts[e.type] || 0) + 1;
+      return results;
+    } catch(e) {
+      console.error(`[${label}] scraper error:`, e.message);
+      scrapeErrors.push(`${label} — ${e.message.slice(0, 120)}`);
+      perSource[label] = 0;
+      return [];
+    }
+  }
+
   try {
     const [council, voting, mobilize, handsOff, ajc, lwv] = await Promise.all([
-      scrapeCouncil(), scrapeVoting(), scrapeMobilize(),
-      scrapeHandsOff(), scrapeAJC(), scrapeLWV(),
+      runSource("City Council", scrapeCouncil),
+      runSource("Travis County Voting", scrapeVoting),
+      runSource("Mobilize", scrapeMobilize),
+      runSource("Hands Off Central TX", scrapeHandsOff),
+      runSource("Austin Justice Coalition", scrapeAJC),
+      runSource("LWV Austin", scrapeLWV),
     ]);
     const allFound = [...council, ...voting, ...mobilize, ...handsOff, ...ajc, ...lwv];
     console.log(`Found ${allFound.length} candidate events`);
@@ -474,19 +687,22 @@ async function runScraper() {
     const existingKeys = new Set(
       existingEvents.map(e => `${normalizeForDedup(e.name)}__${e.date}`)
     );
+    const existingUrls = new Set(existingEvents.map(e => e.source).filter(Boolean));
 
-    // Remove exact matches (already in system)
+    // Remove exact name+date or URL matches (already in system)
     const candidates = allFound.filter(e => {
       if (!e.date || !e.name) return false;
+      if (e.source && existingUrls.has(e.source)) return false; // URL already exists
       return !existingKeys.has(`${normalizeForDedup(e.name)}__${e.date}`);
     });
-    console.log(`${candidates.length} after exact-dedup`);
+    console.log(`${candidates.length} after exact-dedup (${allFound.length - candidates.length} filtered)`);
 
     // Save — near-dupes automatically get status="duplicate"
     const saved = candidates.length > 0 ? await saveEvents(candidates, existingEvents) : [];
     const newPending = saved.filter(r => r.fields?.Status === "pending").length;
     const newDupes   = saved.filter(r => r.fields?.Status === "duplicate").length;
-    console.log(`Saved: ${newPending} pending, ${newDupes} duplicates flagged`);
+    const dupes      = (allFound.length - candidates.length) + newDupes;
+    console.log(`Saved: ${newPending} pending, ${newDupes} near-dupes flagged`);
 
     let totalPending = 0;
     try {
@@ -499,7 +715,7 @@ async function runScraper() {
       totalPending = (d1.records||[]).length + (d2.records||[]).length;
     } catch(e) {}
 
-    await sendDigest(newPending, totalPending);
+    await sendDigest({ newPending, totalPending, found: allFound.length, dupes, perSource, errors: scrapeErrors, typeCounts, reclassified: 0 });
     console.log(`[${new Date().toISOString()}] Scrape complete.`);
     return { found: allFound.length, newPending, newDupes, totalPending };
   } catch(e) {
@@ -887,6 +1103,38 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
   }
 });
 
+// Edit an event — resets status to pending, requires full 2-admin re-review
+app.put("/admin/events/:id", requireAuth, async (req, res) => {
+  try {
+    const { name, type, date, time, address, desc, lat, lng } = req.body;
+    if (!name || !type || !date || !address)
+      return res.status(400).json({ error: "name, type, date and address are required" });
+    const validTypes = ["protest", "voting", "townhall", "nonprofit", "online"];
+    if (!validTypes.includes(type))
+      return res.status(400).json({ error: `type must be one of: ${validTypes.join(", ")}` });
+    const fields = {
+      Name:        name.trim().slice(0, 100),
+      Type:        type,
+      Date:        date,
+      Time:        time         || "",
+      Address:     address.trim().slice(0, 200),
+      Description: (desc || "").trim().slice(0, 500),
+      Latitude:    parseFloat(lat)  || 30.2672,
+      Longitude:   parseFloat(lng)  || -97.7431,
+      Status:      "pending",     // always reset to pending for full re-review
+      Approvers:   "",
+      RejectedBy:  "",
+      SubmittedBy: `Edited by ${req.admin.name || req.admin.email}`,
+    };
+    await airtable(`/${req.params.id}`, "PATCH", { fields });
+    console.log(`[EDITED] ${req.params.id} by ${req.admin.email} — returned to pending`);
+    res.json({ success: true, newStatus: "pending", message: "Event updated and sent back for re-review" });
+  } catch(e) {
+    console.error("PUT /admin/events/:id:", e.message);
+    res.status(500).json({ error: "Failed to update event" });
+  }
+});
+
 // Restore a rejected or duplicate event back to pending
 app.post("/admin/events/:id/restore", requireAuth, async (req, res) => {
   try {
@@ -909,6 +1157,44 @@ app.post("/admin/events/:id/restore", requireAuth, async (req, res) => {
 app.post("/admin/scrape-now", requireAuth, async (req, res) => {
   res.json({ message: "Scrape started — new events will appear in your queue shortly" });
   runScraper();
+});
+
+// ── BUG REPORTS ───────────────────────────────────────────────────────────────
+// Public endpoint — no auth required. Emails William when users report issues.
+app.post("/bug-report", async (req, res) => {
+  try {
+    const { what, url, email } = req.body;
+    if (!what || what.trim().length < 5)
+      return res.status(400).json({ error: "Please describe the issue (at least 5 characters)" });
+    if (RESEND_KEY) {
+      const subject = "🐛 COMN Bug Report";
+      const lines = [
+        "A user submitted a bug report via COMN:",
+        "",
+        `What's wrong: ${what.trim()}`,
+        url   ? `Event / URL: ${url.trim()}`      : null,
+        email ? `Reporter email: ${email.trim()}` : null,
+        "",
+        `Submitted: ${new Date().toISOString()}`,
+      ].filter(Boolean);
+      const emailRes = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: "COMN Bugs <onboarding@resend.dev>",
+          to:   DIGEST_EMAIL,
+          subject,
+          text: lines.join("\n"),
+        }),
+      });
+      if (!emailRes.ok) throw new Error("Email send failed");
+    }
+    console.log(`[BUG REPORT] "${what.trim().slice(0, 80)}"`);
+    res.json({ success: true });
+  } catch(e) {
+    console.error("Bug report error:", e.message);
+    res.status(500).json({ error: "Failed to send bug report" });
+  }
 });
 
 app.listen(PORT, () => console.log(`COMN server on port ${PORT}`));
