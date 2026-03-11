@@ -277,8 +277,9 @@ async function scrapeVoting() {
 
 async function scrapeMobilize() {
   try {
+    const nowTs = Math.floor(Date.now() / 1000);
     const res = await fetch(
-      "https://api.mobilize.us/v1/events?zipcode=78701&radius=30&timeslot_start=now&per_page=20&visibility=PUBLIC",
+      `https://api.mobilize.us/v1/events?zipcode=78701&radius=50&timeslot_start=${nowTs}&per_page=50&visibility=PUBLIC`,
       { headers: { "User-Agent": "COMN-Civic-Bot/1.0" }, signal: AbortSignal.timeout(12000) }
     );
     if (!res.ok) return [];
@@ -496,7 +497,7 @@ async function scrapeAJC() {
     const date = parseDate(m[0]);
     if (date && inWindow(date)) dates.push(date);
   }
-  for (let i = 0; i < Math.min(names.length, dates.length, 8); i++) {
+  for (let i = 0; i < Math.min(names.length, dates.length, 20); i++) {
     if (!names[i] || names[i].length < 4) continue;
     base.push({
       name: names[i].replace(/&amp;/g,"&"),
@@ -543,7 +544,7 @@ async function scrapeLWV() {
       source: "https://lwvaustin.org/events/",
     });
   }
-  return events.slice(0, 5);
+  return events.slice(0, 15);
 }
 
 // ── DEDUPLICATION ─────────────────────────────────────────────────────────────
