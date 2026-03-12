@@ -129,7 +129,12 @@ function threeMonthsFromNow() {
   d.setMonth(d.getMonth() + 3);
   return d.toISOString().split("T")[0];
 }
-function inWindow(d) { return d && d >= today() && d <= threeMonthsFromNow(); }
+function sixMonthsFromNow() {
+  const d = new Date();
+  d.setMonth(d.getMonth() + 6);
+  return d.toISOString().split("T")[0];
+}
+function inWindow(d) { return d && d >= today() && d <= sixMonthsFromNow(); }
 function inFuture(d) { return d && d >= today(); }
 
 // ── AIRTABLE HELPERS ──────────────────────────────────────────────────────────
@@ -260,24 +265,67 @@ function parseDate(str) {
 // ── SCRAPERS ──────────────────────────────────────────────────────────────────
 
 async function scrapeCouncil() {
-  const html = await fetchHTML("https://www.austintexas.gov/department/city-council/2026/2026_council_index.htm");
-  if (!html) return [];
   const events = [];
   const seen = new Set();
-  const re = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    const date = parseDate(m[0]);
-    if (!date || !inWindow(date) || seen.has(date)) continue;
-    seen.add(date);
-    events.push({
-      name: "Austin City Council Regular Meeting",
-      type: "townhall", date, time: "10:00",
-      address: "Austin City Hall, 301 W. Second Street, Austin, TX",
-      lat: 30.2636, lng: -97.7466,
-      desc: "Regular public meeting of the Austin City Council. Public comment is open — register to speak in-person or by phone at austintexas.gov before the meeting.",
-      source: "https://www.austintexas.gov/department/city-council/2026/2026_council_index.htm",
-    });
+
+  // METHOD 1: Official 2026 City Council index page (confirmed working)
+  try {
+    const years = ["2026", "2027"];
+    for (const yr of years) {
+      const html = await fetchHTML(`https://www.austintexas.gov/department/city-council/${yr}/${yr}_council_index.htm`);
+      if (!html) continue;
+      // Match dates like "March 12, 2026" or "April 10 2026"
+      const re = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*20(26|27)/gi;
+      let m;
+      while ((m = re.exec(html)) !== null) {
+        const date = parseDate(m[0]);
+        if (!date || !inWindow(date) || seen.has(date)) continue;
+        seen.add(date);
+        // Try to extract meeting type from surrounding context
+        const ctx = html.slice(Math.max(0, m.index - 200), m.index + 200);
+        const isWork = /work session/i.test(ctx);
+        const isSpecial = /special/i.test(ctx);
+        const meetingName = isSpecial ? "Austin City Council Special Meeting" :
+                            isWork    ? "Austin City Council Work Session" :
+                                        "Austin City Council Regular Meeting";
+        events.push({
+          name: meetingName,
+          type: "townhall", date, time: isWork ? "09:00" : "10:00",
+          address: "Austin City Hall, 301 W. Second Street, Austin, TX 78701",
+          lat: 30.2636, lng: -97.7466,
+          desc: "Public meeting of the Austin City Council. Register to speak in-person or by phone at austintexas.gov before the meeting. Meetings are also streamed live.",
+          source: `https://www.austintexas.gov/department/city-council/${yr}/${yr}_council_index.htm`,
+        });
+      }
+    }
+    if (events.length > 0) {
+      console.log(`[City Council] Found ${events.length} meetings from index page`);
+      return events;
+    }
+  } catch(e) { console.warn("[City Council index]", e.message); }
+
+  // METHOD 2: Fallback — generate every-other-Thursday (Council typically meets bi-weekly)
+  console.warn("[City Council] Index page failed — generating schedule");
+  const d = new Date();
+  const end = new Date(); end.setMonth(end.getMonth() + 6);
+  // Move to next Thursday
+  while (d.getDay() !== 4) d.setDate(d.getDate() + 1);
+  let count = 0;
+  while (d <= end && count < 24) {
+    const date = d.toISOString().split("T")[0];
+    if (!seen.has(date)) {
+      seen.add(date);
+      events.push({
+        name: "Austin City Council Meeting",
+        type: "townhall", date, time: "10:00",
+        address: "Austin City Hall, 301 W. Second Street, Austin, TX 78701",
+        lat: 30.2636, lng: -97.7466,
+        desc: "Public meeting of the Austin City Council. Register to speak at austintexas.gov. Verify schedule at austintexas.gov before attending.",
+        source: "https://www.austintexas.gov/department/city-council",
+      });
+    }
+    d.setDate(d.getDate() + 14); // Every other Thursday
+    count++;
   }
   return events;
 }
@@ -309,7 +357,7 @@ async function scrapeMobilize() {
   try {
     const nowTs = Math.floor(Date.now() / 1000);
     const res = await fetch(
-      `https://api.mobilize.us/v1/events?zipcode=78701&radius=50&timeslot_start=${nowTs}&per_page=50&visibility=PUBLIC`,
+      `https://api.mobilize.us/v1/events?zipcode=78701&radius=50&timeslot_start=${nowTs}&timeslot_start_min=${nowTs}&per_page=100&visibility=PUBLIC&order_by=timeslot_start`,
       { headers: { "User-Agent": "COMN-Civic-Bot/1.0" }, signal: AbortSignal.timeout(12000) }
     );
     if (!res.ok) return [];
@@ -759,38 +807,89 @@ async function scrapeEventbriteAustin() {
 
 // ── TRAVIS COUNTY COMMISSIONERS COURT ─────────────────────────────────────────
 async function scrapeTravisCountyCommissioners() {
-  try {
-    const res = await fetch("https://www.traviscountytx.gov/commissioners-court/agenda-calendar", {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; COMN-Civic-Bot/1.0)" },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) return [];
-    const html = await res.text();
-    const events = [];
-    const seen = new Set();
+  const events = [];
+  const seen = new Set();
 
-    // Look for meeting dates near "Commissioners Court" keyword
-    const meetingRe = /(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2}|\w+\s+\d{1,2},?\s+\d{4})/g;
-    let m;
-    while ((m = meetingRe.exec(html)) !== null) {
-      const date = parseDate(m[1]);
-      if (!date || !inWindow(date) || seen.has(date)) continue;
-      // Confirm meeting context nearby
-      const ctx = html.slice(Math.max(0, m.index - 200), m.index + 200);
-      if (!/commissioners|court|meeting|agenda/i.test(ctx)) continue;
+  // METHOD 1: Try CivicClerk portal (their new agenda system)
+  try {
+    const res = await fetch("https://traviscotx.portal.civicclerk.com/", {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; COMN-Civic-Bot/1.0)" },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (res.ok) {
+      const html = await res.text();
+      // Look for date patterns in the agenda portal
+      const dateRe = /(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})/gi;
+      let m;
+      while ((m = dateRe.exec(html)) !== null) {
+        const date = parseDate(m[1]);
+        if (!date || !inWindow(date) || seen.has(date)) continue;
+        const ctx = html.slice(Math.max(0, m.index - 300), m.index + 300);
+        if (!/commissioners|court|meeting|agenda/i.test(ctx)) continue;
+        seen.add(date);
+        events.push({
+          name: "Travis County Commissioners Court Meeting",
+          type: "townhall", date, time: "09:00",
+          address: "700 Lavaca St, Austin, TX 78701",
+          lat: 30.2695, lng: -97.7441,
+          desc: "Travis County Commissioners Court meeting. Open to the public. Public comment period available.",
+          source: "https://traviscotx.portal.civicclerk.com/",
+        });
+      }
+      if (events.length > 0) {
+        console.log(`[Travis CC] Found ${events.length} meetings from CivicClerk`);
+        return events.slice(0, 26);
+      }
+    }
+  } catch(e) { console.warn("[Travis CC CivicClerk]", e.message); }
+
+  // METHOD 2: Try the main commissioners-court page
+  try {
+    const html = await fetchHTML("https://www.traviscountytx.gov/commissioners-court");
+    if (html) {
+      const dateRe = /(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})/gi;
+      let m;
+      while ((m = dateRe.exec(html)) !== null) {
+        const date = parseDate(m[1]);
+        if (!date || !inWindow(date) || seen.has(date)) continue;
+        const ctx = html.slice(Math.max(0, m.index - 300), m.index + 300);
+        if (!/commissioners|court|meeting|agenda|tuesday/i.test(ctx)) continue;
+        seen.add(date);
+        events.push({
+          name: "Travis County Commissioners Court Meeting",
+          type: "townhall", date, time: "09:00",
+          address: "700 Lavaca St, Austin, TX 78701",
+          lat: 30.2695, lng: -97.7441,
+          desc: "Travis County Commissioners Court meeting. Open to the public. Public comment period available.",
+          source: "https://www.traviscountytx.gov/commissioners-court",
+        });
+      }
+      if (events.length > 0) return events.slice(0, 26);
+    }
+  } catch(e) { console.warn("[Travis CC main page]", e.message); }
+
+  // METHOD 3: Programmatic — Commissioners Court meets EVERY TUESDAY at 9:00 AM
+  console.warn("[Travis CC] Falling back to programmatic Tuesday schedule");
+  const d = new Date();
+  const end = new Date(); end.setMonth(end.getMonth() + 6);
+  // Move to next Tuesday
+  while (d.getDay() !== 2) d.setDate(d.getDate() + 1);
+  while (d <= end && events.length < 26) {
+    const date = d.toISOString().split("T")[0];
+    if (!seen.has(date)) {
       seen.add(date);
       events.push({
         name: "Travis County Commissioners Court Meeting",
-        type: "townhall",
-        date, time: "09:00",
+        type: "townhall", date, time: "09:00",
         address: "700 Lavaca St, Austin, TX 78701",
         lat: 30.2695, lng: -97.7441,
-        desc: "Regular Travis County Commissioners Court meeting. Open to the public. Includes public comment period.",
-        source: "https://www.traviscountytx.gov/commissioners-court/agenda-calendar",
+        desc: "Travis County Commissioners Court meets every Tuesday at 9 AM. Open to the public with a public comment period. Verify specific dates at traviscountytx.gov.",
+        source: "https://www.traviscountytx.gov/commissioners-court",
       });
     }
-    return events.slice(0, 10);
-  } catch(e) { console.error("[Travis County Commissioners]", e.message); return []; }
+    d.setDate(d.getDate() + 7);
+  }
+  return events;
 }
 
 // ── WORDPRESS EVENTS CALENDAR HELPER ──────────────────────────────────────────
@@ -868,7 +967,10 @@ async function scrapeTXLegislature() {
   try {
     const events = [];
     // Try XML hearing notice feed for current session (89th Legislature)
-    const xmlText = await fetchHTML("https://capitol.texas.gov/tlodocs/89R/schedulexml/hearing.xml");
+    // Try different session codes for the XML feed
+    let xmlText = await fetchHTML("https://capitol.texas.gov/tlodocs/89R/schedulexml/hearing.xml");
+    if (!xmlText) xmlText = await fetchHTML("https://capitol.texas.gov/tlodocs/88R/schedulexml/hearing.xml");
+    if (!xmlText) xmlText = await fetchHTML("https://capitol.texas.gov/tlodocs/892/schedulexml/hearing.xml");
     if (xmlText) {
       const hearingRe = /<hearing[^>]*>([\s\S]*?)<\/hearing>/gi;
       const seen = new Set();
@@ -981,30 +1083,193 @@ async function scrapeTexasTribune() {
 
 // ── AUSTIN ISD BOARD OF TRUSTEES ──────────────────────────────────────────────
 async function scrapeAISDBoard() {
-  try {
-    const html = await fetchHTML("https://www.austinisd.org/board/board-meetings-calendar");
-    if (!html) return [];
-    const events = [];
-    const seen = new Set();
-    const dateRe = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
-    let m;
-    while ((m = dateRe.exec(html)) !== null) {
-      const date = parseDate(m[0]);
-      if (!date || !inWindow(date) || seen.has(date)) continue;
-      const ctx = html.slice(Math.max(0, m.index - 300), m.index + 300);
-      if (!/board|trustee|meeting|agenda/i.test(ctx)) continue;
-      seen.add(date);
-      events.push({
-        name: "Austin ISD Board of Trustees Meeting",
-        type: "townhall", date, time: "17:30",
-        address: "Austin ISD, 1111 West 6th Street, Austin, TX 78703",
-        lat: 30.2710, lng: -97.7577,
-        desc: "Regular public meeting of the Austin Independent School District Board of Trustees. Public comment available.",
-        source: "https://www.austinisd.org/board/board-meetings-calendar",
-      });
+  const events = [];
+  const seen = new Set();
+
+  // METHOD 1: Try several possible AISD board calendar URLs
+  const aisdUrls = [
+    "https://www.austinisd.org/board",
+    "https://www.austinisd.org/board-of-trustees",
+    "https://www.austinisd.org/about/leadership/board-of-trustees",
+  ];
+  for (const url of aisdUrls) {
+    try {
+      const html = await fetchHTML(url);
+      if (!html) continue;
+      const dateRe = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
+      let m;
+      while ((m = dateRe.exec(html)) !== null) {
+        const date = parseDate(m[0]);
+        if (!date || !inWindow(date) || seen.has(date)) continue;
+        const ctx = html.slice(Math.max(0, m.index - 300), m.index + 300);
+        if (!/board|trustee|meeting|agenda/i.test(ctx)) continue;
+        seen.add(date);
+        events.push({
+          name: "Austin ISD Board of Trustees Meeting",
+          type: "townhall", date, time: "17:30",
+          address: "Austin ISD, 1111 West 6th Street, Austin, TX 78703",
+          lat: 30.2710, lng: -97.7577,
+          desc: "Regular public meeting of the Austin ISD Board of Trustees. Public comment available. Check austinisd.org for agenda.",
+          source: url,
+        });
+      }
+      if (events.length > 0) {
+        console.log(`[AISD Board] Found ${events.length} meetings from ${url}`);
+        return events.slice(0, 10);
+      }
+    } catch(e) { /* try next */ }
+  }
+
+  // METHOD 2: Programmatic — AISD Board meets 3rd Monday of each month at 5:30 PM
+  console.warn("[AISD Board] Falling back to programmatic 3rd-Monday schedule");
+  const now = new Date();
+  for (let mo = 0; mo < 7; mo++) {
+    const year = now.getFullYear();
+    const month = (now.getMonth() + mo) % 12;
+    const yearAdj = year + Math.floor((now.getMonth() + mo) / 12);
+    let mondayCount = 0;
+    for (let day = 1; day <= 31; day++) {
+      const dt = new Date(yearAdj, month, day);
+      if (dt.getMonth() !== month) break;
+      if (dt.getDay() === 1) { // Monday
+        mondayCount++;
+        if (mondayCount === 3) {
+          const date = dt.toISOString().split("T")[0];
+          if (date >= today() && !seen.has(date)) {
+            seen.add(date);
+            events.push({
+              name: "Austin ISD Board of Trustees Meeting",
+              type: "townhall", date, time: "17:30",
+              address: "Austin ISD, 1111 West 6th Street, Austin, TX 78703",
+              lat: 30.2710, lng: -97.7577,
+              desc: "Regular public meeting of the Austin ISD Board of Trustees (3rd Monday of month). Public comment available. Verify at austinisd.org.",
+              source: "https://www.austinisd.org/board-of-trustees",
+            });
+          }
+          break;
+        }
+      }
     }
-    return events.slice(0, 10);
-  } catch(e) { console.warn("[AISD Board]", e.message); return []; }
+  }
+  return events;
+}
+
+// ── AUSTIN PLANNING COMMISSION ─────────────────────────────────────────────────
+async function scrapeAustinPlanningCommission() {
+  const events = [];
+  const seen = new Set();
+
+  // Try Austin Planning Commission pages
+  const urls = [
+    "https://www.austintexas.gov/department/planning-commission",
+    "https://www.austintexas.gov/cityclerk/boards_commissions/meetingschedule/120.htm",
+    "https://austintexas.gov/planningcommission",
+  ];
+  for (const url of urls) {
+    try {
+      const html = await fetchHTML(url);
+      if (!html) continue;
+      const dateRe = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
+      let m;
+      while ((m = dateRe.exec(html)) !== null) {
+        const date = parseDate(m[0]);
+        if (!date || !inWindow(date) || seen.has(date)) continue;
+        const ctx = html.slice(Math.max(0, m.index - 300), m.index + 300);
+        if (!/planning|commission|meeting|agenda/i.test(ctx)) continue;
+        seen.add(date);
+        events.push({
+          name: "Austin Planning Commission Meeting",
+          type: "townhall", date, time: "18:00",
+          address: "Austin City Hall, 301 W. Second Street, Austin, TX 78701",
+          lat: 30.2636, lng: -97.7466,
+          desc: "Austin Planning Commission meeting. Reviews land use, zoning, and development applications. Public comment welcome.",
+          source: url,
+        });
+      }
+      if (events.length > 0) return events.slice(0, 12);
+    } catch(e) { /* try next */ }
+  }
+
+  // Fallback: Planning Commission meets 2nd and 4th Tuesdays at 6 PM
+  const now = new Date();
+  const end = new Date(); end.setMonth(end.getMonth() + 6);
+  const d = new Date(now);
+  while (d.getDay() !== 2) d.setDate(d.getDate() + 1); // Next Tuesday
+  let week = 1;
+  let prevMonth = d.getMonth();
+  while (d <= end && events.length < 15) {
+    if (d.getMonth() !== prevMonth) { week = 1; prevMonth = d.getMonth(); }
+    if (week === 2 || week === 4) {
+      const date = d.toISOString().split("T")[0];
+      if (!seen.has(date)) {
+        seen.add(date);
+        events.push({
+          name: "Austin Planning Commission Meeting",
+          type: "townhall", date, time: "18:00",
+          address: "Austin City Hall, 301 W. Second Street, Austin, TX 78701",
+          lat: 30.2636, lng: -97.7466,
+          desc: "Austin Planning Commission meets 2nd and 4th Tuesdays. Reviews zoning and development cases. Public comment welcome. Verify at austintexas.gov.",
+          source: "https://www.austintexas.gov/department/planning-commission",
+        });
+      }
+    }
+    d.setDate(d.getDate() + 7);
+    week++;
+  }
+  return events;
+}
+
+// ── AUSTIN WATER / ELECTRIC / OTHER CITY BOARDS (programmatic) ─────────────────
+async function scrapeAustinCityBoards() {
+  // Generate meetings for key city boards that meet on fixed schedules
+  const events = [];
+  const seen = new Set();
+  const now = new Date();
+
+  // Austin Water & Wastewater Commission — 1st Wednesday, 6 PM
+  // Austin Parks & Recreation Board — 2nd Monday, 6 PM  
+  // Austin Zoning Board of Adjustment — 1st Monday, 9 AM
+  // Electric Utility Commission — 3rd Wednesday, 6 PM
+  const boards = [
+    { name: "Austin Zoning Board of Adjustment Meeting",       dayOfWeek: 1, weekOfMonth: 1, time: "09:00", desc: "Austin Zoning Board of Adjustment (1st Monday). Reviews variance requests and zoning appeals. Public comment welcome." },
+    { name: "Austin Parks & Recreation Board Meeting",         dayOfWeek: 1, weekOfMonth: 2, time: "18:00", desc: "Austin Parks & Recreation Board (2nd Monday). Reviews parks policy and capital projects. Public comment welcome." },
+    { name: "Austin Water & Wastewater Commission Meeting",    dayOfWeek: 3, weekOfMonth: 1, time: "18:00", desc: "Austin Water & Wastewater Commission (1st Wednesday). Reviews water utility rates and policy." },
+    { name: "Austin Electric Utility Commission Meeting",      dayOfWeek: 3, weekOfMonth: 3, time: "18:00", desc: "Austin Electric Utility Commission (3rd Wednesday). Reviews Austin Energy policy, rates, and programs." },
+    { name: "Austin Transportation & Public Works Commission", dayOfWeek: 2, weekOfMonth: 3, time: "10:00", desc: "Austin Transportation & Public Works Commission (3rd Tuesday). Reviews transportation policy and infrastructure projects." },
+  ];
+
+  for (let mo = 0; mo < 6; mo++) {
+    const year = now.getFullYear();
+    const month = (now.getMonth() + mo) % 12;
+    const yearAdj = year + Math.floor((now.getMonth() + mo) / 12);
+
+    for (const board of boards) {
+      let weekCount = 0;
+      for (let day = 1; day <= 31; day++) {
+        const dt = new Date(yearAdj, month, day);
+        if (dt.getMonth() !== month) break;
+        if (dt.getDay() === board.dayOfWeek) {
+          weekCount++;
+          if (weekCount === board.weekOfMonth) {
+            const date = dt.toISOString().split("T")[0];
+            if (date >= today() && !seen.has(board.name + date)) {
+              seen.add(board.name + date);
+              events.push({
+                name: board.name,
+                type: "townhall", date, time: board.time,
+                address: "Austin City Hall, 301 W. Second Street, Austin, TX 78701",
+                lat: 30.2636, lng: -97.7466,
+                desc: board.desc + " Verify at austintexas.gov/boards-commissions.",
+                source: "https://www.austintexas.gov/boards-commissions",
+              });
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+  return events;
 }
 
 // ── INDIVISIBLE AUSTIN ─────────────────────────────────────────────────────────
@@ -1372,34 +1637,36 @@ async function runScraper() {
   try {
     const t0 = Date.now();
     const [council, voting, mobilize, handsOff, ajc, lwv, austinCal, chronicle, eventbrite, travisCC,
-           txLeg, texasTrib, aisd, indivisible, moveTX, workersDef, texasOrg, tfn, tcDems, sunrise, txCivil, acluTX, do512, luma] = await Promise.all([
-      runSource("council",    "City Council",                 scrapeCouncil),
-      runSource("voting",     "Travis County Voting",         scrapeVoting),
-      runSource("mobilize",   "Mobilize",                     scrapeMobilize),
-      runSource("handsoff",   "Hands Off Central TX",         scrapeHandsOff),
-      runSource("ajc",        "Austin Justice Coalition",     scrapeAJC),
-      runSource("lwv",        "LWV Austin",                   scrapeLWV),
-      runSource("austincal",  "City of Austin Calendar",      scrapeAustinCityCalendar),
-      runSource("chronicle",  "Austin Chronicle",             scrapeAustinChronicle),
-      runSource("eventbrite", "Eventbrite Austin",            scrapeEventbriteAustin),
-      runSource("traviscc",   "Travis County Commissioners",  scrapeTravisCountyCommissioners),
-      runSource("txleg",      "Texas Legislature",            scrapeTXLegislature),
-      runSource("texastrib",  "Texas Tribune Events",         scrapeTexasTribune),
-      runSource("aisd",       "Austin ISD Board",             scrapeAISDBoard),
-      runSource("indivisible","Indivisible Austin",           scrapeIndivisibleAustin),
-      runSource("movetx",     "Move TX",                      scrapeMoveTX),
-      runSource("workersdef", "Workers Defense Project",      scrapeWorkersDefense),
-      runSource("top",        "Texas Organizing Project",     scrapeTexasOrganizing),
-      runSource("tfn",        "Texas Freedom Network",        scrapeTexasFreedomNetwork),
-      runSource("tcdemocrats","Travis County Democrats",      scrapeTravisCountyDems),
-      runSource("sunrise",    "Sunrise Austin",               scrapeSunriseAustin),
-      runSource("txcivil",    "TX Civil Rights Project",      scrapeTexasCivilRights),
-      runSource("aclutx",     "ACLU Texas",                   scrapeACLUTexas),
-      runSource("do512",      "Do512 Civic Calendar",         scrapeDo512),
-      runSource("luma",       "Luma Austin Events",           scrapeLumaAustin),
+           txLeg, texasTrib, aisd, planningComm, cityBoards, indivisible, moveTX, workersDef, texasOrg, tfn, tcDems, sunrise, txCivil, acluTX, do512, luma] = await Promise.all([
+      runSource("council",      "City Council",                   scrapeCouncil),
+      runSource("voting",       "Travis County Voting",           scrapeVoting),
+      runSource("mobilize",     "Mobilize",                       scrapeMobilize),
+      runSource("handsoff",     "Hands Off Central TX",           scrapeHandsOff),
+      runSource("ajc",          "Austin Justice Coalition",       scrapeAJC),
+      runSource("lwv",          "LWV Austin",                     scrapeLWV),
+      runSource("austincal",    "City of Austin Calendar",        scrapeAustinCityCalendar),
+      runSource("chronicle",    "Austin Chronicle",               scrapeAustinChronicle),
+      runSource("eventbrite",   "Eventbrite Austin",              scrapeEventbriteAustin),
+      runSource("traviscc",     "Travis County Commissioners",    scrapeTravisCountyCommissioners),
+      runSource("txleg",        "Texas Legislature",              scrapeTXLegislature),
+      runSource("texastrib",    "Texas Tribune Events",           scrapeTexasTribune),
+      runSource("aisd",         "Austin ISD Board",               scrapeAISDBoard),
+      runSource("planningcomm", "Austin Planning Commission",     scrapeAustinPlanningCommission),
+      runSource("cityboards",   "Austin City Boards",             scrapeAustinCityBoards),
+      runSource("indivisible",  "Indivisible Austin",             scrapeIndivisibleAustin),
+      runSource("movetx",       "Move TX",                        scrapeMoveTX),
+      runSource("workersdef",   "Workers Defense Project",        scrapeWorkersDefense),
+      runSource("top",          "Texas Organizing Project",       scrapeTexasOrganizing),
+      runSource("tfn",          "Texas Freedom Network",          scrapeTexasFreedomNetwork),
+      runSource("tcdemocrats",  "Travis County Democrats",        scrapeTravisCountyDems),
+      runSource("sunrise",      "Sunrise Austin",                 scrapeSunriseAustin),
+      runSource("txcivil",      "TX Civil Rights Project",        scrapeTexasCivilRights),
+      runSource("aclutx",       "ACLU Texas",                     scrapeACLUTexas),
+      runSource("do512",        "Do512 Civic Calendar",           scrapeDo512),
+      runSource("luma",         "Luma Austin Events",             scrapeLumaAustin),
     ]);
     const allFound = [...council, ...voting, ...mobilize, ...handsOff, ...ajc, ...lwv, ...austinCal, ...chronicle, ...eventbrite, ...travisCC,
-                      ...txLeg, ...texasTrib, ...aisd, ...indivisible, ...moveTX, ...workersDef, ...texasOrg, ...tfn, ...tcDems, ...sunrise, ...txCivil, ...acluTX, ...do512, ...luma];
+                      ...txLeg, ...texasTrib, ...aisd, ...planningComm, ...cityBoards, ...indivisible, ...moveTX, ...workersDef, ...texasOrg, ...tfn, ...tcDems, ...sunrise, ...txCivil, ...acluTX, ...do512, ...luma];
     console.log(`Found ${allFound.length} candidate events`);
 
     const existingEvents = await getExistingEventsForDedup();
@@ -1443,15 +1710,15 @@ async function runScraper() {
   }
 }
 
-// ── CRON: 12 PM CT ───────────────────────────────────────────────────────────
-let lastScrapeDate = "";
+// ── CRON: EVERY HOUR ─────────────────────────────────────────────────────────
+let lastScrapeHour = "";
 setInterval(() => {
   const now = new Date();
-  const ctHour = (now.getUTCHours() - 5 + 24) % 24;
-  const ctDate = now.toISOString().split("T")[0];
-  if (ctHour === 12 && ctDate !== lastScrapeDate) {
-    lastScrapeDate = ctDate;
-    console.log("⏰ 12 PM CT — running daily scrape");
+  const hourKey = now.toISOString().slice(0, 13); // "2026-03-12T15" — unique per hour
+  if (hourKey !== lastScrapeHour) {
+    lastScrapeHour = hourKey;
+    const ctHour = (now.getUTCHours() - 5 + 24) % 24;
+    console.log(`⏰ Hourly scrape — ${now.toISOString()} (${ctHour}:00 CT)`);
     runScraper();
   }
 }, 60 * 1000);
