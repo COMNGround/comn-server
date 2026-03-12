@@ -1626,7 +1626,7 @@ setInterval(() => {
 // ══════════════════════════════════════════════════════════════════════════════
 
 app.get("/", (req, res) =>
-  res.json({ status: "COMN server running", nextScrape: "Daily 12 PM CT" })
+  res.json({ status: "COMN server running", nextScrape: "Hourly" })
 );
 
 // ── PUBLIC EVENTS ─────────────────────────────────────────────────────────────
