@@ -7,7 +7,7 @@ const crypto  = require("crypto");
 const app  = express();
 const PORT = process.env.PORT || 8080;
 
-const AT_TOKEN = process.env.AT_TOKEN;
+const AT_TOKEN = process.env.AT_TOKEN
 const AT_BASE  = process.env.AT_BASE;
 const AT_TABLE        = "Events";
 const AT_ADMINS_TABLE = "Admins";
@@ -795,7 +795,7 @@ function isSimilarEvent(name1, date1, name2, date2) {
   const w1 = new Set(n1.split(" ").filter(w => w.length > 3));
   const w2 = new Set(n2.split(" ").filter(w => w.length > 3));
   let overlap = 0;
-  fo2 (const w of w1) if (w2.has(w)) overlap++;
+  for (const w of w1) if (w2.has(w)) overlap++;
   return overlap >= 2 && overlap >= Math.min(w1.size, w2.size) * 0.6;
 }
 
