@@ -21,6 +21,36 @@ const ADMIN_URL    = "https://comnground.netlify.app/admin.html";
 const JWT_SECRET = process.env.JWT_SECRET || "comn-dev-jwt-secret-CHANGE-IN-PROD";
 if (!process.env.JWT_SECRET) console.warn("[WARN] JWT_SECRET env var not set — using insecure default. Set it in Railway before going to production.");
 
+// ── SOURCES REGISTRY ──────────────────────────────────────────────────────────
+const SOURCES = [
+  { id: "council",    label: "Austin City Council",          url: "https://www.austintexas.gov/calendar",                 type: "government", desc: "Austin city government meetings and public hearings" },
+  { id: "voting",     label: "Travis County Voting",         url: "https://votetravis.gov",                               type: "government", desc: "Travis County elections and voting information" },
+  { id: "mobilize",   label: "Mobilize.us",                  url: "https://api.mobilize.us/v1/events",                    type: "platform",   desc: "Civic engagement events near Austin (50-mile radius)" },
+  { id: "handsoff",   label: "Hands Off Central TX",         url: "https://handsoffcentraltx.org/events",                 type: "nonprofit",  desc: "Austin-area advocacy and civic events" },
+  { id: "ajc",        label: "Austin Justice Coalition",     url: "https://austinjustice.org/events",                     type: "nonprofit",  desc: "Criminal justice and equity events" },
+  { id: "lwv",        label: "LWV Austin",                   url: "https://lwvaustin.org/events",                         type: "nonprofit",  desc: "League of Women Voters Austin civic education events" },
+  { id: "austincal",  label: "City of Austin Open Calendar", url: "https://www.austintexas.gov/calendar",                 type: "government", desc: "All public city events, programs, and government meetings" },
+  { id: "chronicle",  label: "Austin Chronicle Events",      url: "https://www.austinchronicle.com/events/",              type: "media",      desc: "Austin Chronicle calendar — civic events only (keyword filtered)" },
+  { id: "eventbrite", label: "Eventbrite Austin",            url: "https://www.eventbrite.com/d/tx--austin/community/",   type: "platform",   desc: "Community and civic events on Eventbrite — keyword filtered" },
+  { id: "traviscc",   label: "Travis County Commissioners",  url: "https://www.traviscountytx.gov/commissioners-court",   type: "government", desc: "Travis County Commissioners Court meetings and hearings" },
+  { id: "txleg",      label: "Texas Legislature",            url: "https://capitol.texas.gov/Committees/Committees.aspx", type: "government", desc: "Texas Legislature committee hearings and public sessions" },
+  { id: "texastrib",  label: "Texas Tribune Events",         url: "https://www.texastribune.org/events/",                type: "media",      desc: "Texas Tribune civic journalism events, panels, and forums" },
+  { id: "aisd",       label: "Austin ISD Board",             url: "https://www.austinisd.org/board/board-meetings-calendar", type: "government", desc: "Austin ISD Board of Trustees public meetings" },
+  { id: "indivisible",label: "Indivisible Austin",           url: "https://indivisibleaustin.com/events/",               type: "nonprofit",  desc: "Indivisible Austin civic action and advocacy events" },
+  { id: "movetx",     label: "Move TX",                      url: "https://movetx.org/events/",                          type: "nonprofit",  desc: "Move TX civic engagement and voter registration events" },
+  { id: "workersdef", label: "Workers Defense Project",      url: "https://workersdefense.org/events/",                  type: "nonprofit",  desc: "Workers Defense Project labor rights events in Austin" },
+  { id: "top",        label: "Texas Organizing Project",     url: "https://organizetexas.org/events/",                   type: "nonprofit",  desc: "Texas Organizing Project community organizing events" },
+  { id: "tfn",        label: "Texas Freedom Network",        url: "https://tfn.org/events/",                             type: "nonprofit",  desc: "Texas Freedom Network civil liberties and education events" },
+  { id: "tcdemocrats",label: "Travis County Democrats",      url: "https://travisdemocrats.org/events/",                 type: "nonprofit",  desc: "Travis County Democratic Party meetings and civic events" },
+  { id: "sunrise",    label: "Sunrise Austin",               url: "https://www.sunrisemovement.org/hubs/austin",         type: "nonprofit",  desc: "Sunrise Movement Austin climate action events" },
+  { id: "txcivil",    label: "TX Civil Rights Project",      url: "https://texascivilrightsproject.org/events/",         type: "nonprofit",  desc: "Texas Civil Rights Project advocacy events and workshops" },
+  { id: "aclutx",     label: "ACLU Texas",                   url: "https://www.aclutx.org/events",                       type: "nonprofit",  desc: "ACLU of Texas civil liberties events and advocacy actions" },
+  { id: "do512",      label: "Do512 Civic Calendar",         url: "https://do512.com/events/category/civic",             type: "media",      desc: "Do512 Austin community calendar — civic and community events" },
+  { id: "luma",       label: "Luma Austin Events",           url: "https://lu.ma/austin",                                type: "platform",   desc: "Luma platform — Austin civic and community organizing events" },
+];
+// Runtime tracking: updated after each scrape run
+const scrapeResults = {}; // id → { lastRun, found, error, durationMs }
+
 function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -547,6 +577,613 @@ async function scrapeLWV() {
   return events.slice(0, 15);
 }
 
+// ── CIVIC KEYWORD FILTER (for broad platform/media sources) ───────────────────
+const CIVIC_KW = /\b(town hall|townhall|city council|county|public hearing|community meeting|nonprofit|voter|voting|election|runoff|primary|rally|march|protest|vigil|civil rights|civic|community forum|neighborhood meeting|district|legislature|legislative|policy|advocacy|social justice|equity|climate|housing|public safety|candidate|political action|community org|volunteer|activism|ballot|commissioner|school board)\b/i;
+
+// ── CITY OF AUSTIN OPEN CALENDAR ──────────────────────────────────────────────
+async function scrapeAustinCityCalendar() {
+  try {
+    const res = await fetch("https://www.austintexas.gov/calendar", {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; COMN-Civic-Bot/1.0; +https://comnground.netlify.app)" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const events = [];
+
+    // Try JSON-LD structured data first (most reliable)
+    const jsonLdRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = jsonLdRe.exec(html)) !== null) {
+      try {
+        const raw = JSON.parse(m[1]);
+        const items = Array.isArray(raw) ? raw : [raw];
+        for (const item of items) {
+          if (item["@type"] !== "Event") continue;
+          const name = (item.name || "").trim();
+          const startDate = item.startDate || "";
+          const date = startDate.split("T")[0];
+          const time = startDate.includes("T") ? startDate.split("T")[1].slice(0, 5) : "09:00";
+          const desc = (item.description || "").replace(/<[^>]*>/g, "").slice(0, 250);
+          const addr = item.location?.address?.streetAddress || item.location?.name || "Austin, TX";
+          const src = item.url || "https://www.austintexas.gov/calendar";
+          if (name && date && inWindow(date)) {
+            events.push({ name: name.slice(0, 100), type: detectEventType(name, desc), date, time, address: addr, lat: 30.2672, lng: -97.7431, desc, source: src });
+          }
+        }
+      } catch(e) {}
+    }
+    if (events.length > 0) return events.slice(0, 25);
+
+    // HTML fallback: parse Drupal calendar view
+    const eventLinkRe = /href="(https?:\/\/www\.austintexas\.gov\/[^"]*(?:event|calendar|meeting|hearing|program)[^"]*)"[^>]*>([^<]{5,100})</gi;
+    const dateNearby = /(\d{4}-\d{2}-\d{2}|\b\w+\s+\d{1,2},?\s+\d{4})/;
+    const seen = new Set();
+    while ((m = eventLinkRe.exec(html)) !== null) {
+      const src2 = m[1], name = m[2].trim();
+      if (!name || seen.has(src2)) continue;
+      seen.add(src2);
+      const surrounding = html.slice(Math.max(0, m.index - 300), m.index + 500);
+      const dm = dateNearby.exec(surrounding);
+      const date = dm ? parseDate(dm[1]) : null;
+      if (!date || !inWindow(date)) continue;
+      events.push({ name: name.slice(0, 100), type: detectEventType(name, ""), date, time: "09:00", address: "Austin, TX", lat: 30.2672, lng: -97.7431, desc: "Austin city government event. See source for full details.", source: src2 });
+    }
+    return events.slice(0, 25);
+  } catch(e) { console.error("[Austin City Calendar]", e.message); return []; }
+}
+
+// ── AUSTIN CHRONICLE CIVIC EVENTS ─────────────────────────────────────────────
+async function scrapeAustinChronicle() {
+  try {
+    const res = await fetch("https://www.austinchronicle.com/events/", {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; COMN-Civic-Bot/1.0)" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const events = [];
+
+    // Try JSON-LD first
+    const jsonLdRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = jsonLdRe.exec(html)) !== null) {
+      try {
+        const raw = JSON.parse(m[1]);
+        const items = Array.isArray(raw) ? raw : [raw];
+        for (const item of items) {
+          if (item["@type"] !== "Event" && item["@type"] !== "MusicEvent") continue;
+          const name = (item.name || "").trim();
+          const desc = (item.description || "").replace(/<[^>]*>/g, "").slice(0, 250);
+          if (!CIVIC_KW.test(name + " " + desc)) continue;
+          const startDate = item.startDate || "";
+          const date = startDate.split("T")[0];
+          const time = startDate.includes("T") ? startDate.split("T")[1].slice(0, 5) : "19:00";
+          const addr = item.location?.address?.streetAddress || item.location?.name || "Austin, TX";
+          const src = item.url || "https://www.austinchronicle.com/events/";
+          if (name && date && inWindow(date)) {
+            events.push({ name: name.slice(0, 100), type: detectEventType(name, desc), date, time, address: addr, lat: 30.2672, lng: -97.7431, desc, source: src });
+          }
+        }
+      } catch(e) {}
+    }
+    if (events.length > 0) return events.slice(0, 15);
+
+    // HTML fallback: Chronicle event listing links
+    const titleLinkRe = /href="(https?:\/\/www\.austinchronicle\.com\/events\/[^"]+)"[^>]*>([^<]{4,100})<\/a>/gi;
+    const datePattern = /(\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[,.]?\s+)?(\w+\s+\d{1,2},?\s+\d{4})/i;
+    const seen = new Set();
+    while ((m = titleLinkRe.exec(html)) !== null) {
+      const src2 = m[1], name = m[2].trim();
+      if (!name || seen.has(src2)) continue;
+      seen.add(src2);
+      const surrounding = html.slice(m.index, m.index + 600);
+      if (!CIVIC_KW.test(surrounding)) continue;
+      const dm = datePattern.exec(surrounding);
+      const date = dm ? parseDate(dm[2] || dm[0]) : null;
+      if (!date || !inWindow(date)) continue;
+      const descM = /class="[^"]*desc[^"]*"[^>]*>([\s\S]{0,200}?)<\//.exec(surrounding);
+      const desc = descM ? descM[1].replace(/<[^>]*>/g, "").trim().slice(0, 250) : "";
+      events.push({ name: name.slice(0, 100), type: detectEventType(name, desc), date, time: "19:00", address: "Austin, TX", lat: 30.2672, lng: -97.7431, desc, source: src2 });
+    }
+    return events.slice(0, 15);
+  } catch(e) { console.error("[Austin Chronicle]", e.message); return []; }
+}
+
+// ── EVENTBRITE AUSTIN (CIVIC KEYWORD FILTERED) ────────────────────────────────
+async function scrapeEventbriteAustin() {
+  try {
+    const pages = [
+      "https://www.eventbrite.com/d/tx--austin/community--civic/",
+      "https://www.eventbrite.com/d/tx--austin/nonprofit--charity/",
+    ];
+    const events = [];
+    for (const pageUrl of pages) {
+      try {
+        const res = await fetch(pageUrl, {
+          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
+          signal: AbortSignal.timeout(12000),
+        });
+        if (!res.ok) continue;
+        const html = await res.text();
+
+        // JSON-LD (most reliable when present)
+        const jsonLdRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+        let m;
+        while ((m = jsonLdRe.exec(html)) !== null) {
+          try {
+            const raw = JSON.parse(m[1]);
+            const items = Array.isArray(raw) ? raw : [raw];
+            for (const item of items) {
+              if (item["@type"] !== "Event") continue;
+              const name = (item.name || "").trim();
+              const desc = (item.description || "").replace(/<[^>]*>/g, "").slice(0, 250);
+              if (!CIVIC_KW.test(name + " " + desc)) continue;
+              const startDate = item.startDate || "";
+              const date = startDate.split("T")[0];
+              const time = startDate.includes("T") ? startDate.split("T")[1].slice(0, 5) : "18:00";
+              const isVirtual = (item.eventAttendanceMode || "").includes("Online") || /\b(virtual|online|zoom|webinar)\b/i.test(name + desc);
+              const addr = isVirtual ? "Online" : (item.location?.address?.streetAddress || item.location?.name || "Austin, TX");
+              const src = item.url || pageUrl;
+              if (name && date && inWindow(date) && !events.find(e => e.source === src)) {
+                events.push({ name: name.slice(0, 100), type: detectEventType(name, desc), date, time, address: addr, lat: isVirtual ? 0 : 30.2672, lng: isVirtual ? 0 : -97.7431, desc, source: src });
+              }
+            }
+          } catch(e) {}
+        }
+
+        // Embedded JSON fallback (__SERVER_DATA__ or __ebInit__)
+        const serverDataM = /window\.__SERVER_DATA__\s*=\s*(\{[\s\S]{0,50000}?\});\s*(?:<\/script>|window\.)/.exec(html);
+        if (serverDataM) {
+          try {
+            const sd = JSON.parse(serverDataM[1]);
+            const evList = sd?.search_data?.events?.results || sd?.events || [];
+            for (const ev of evList) {
+              const name = (ev.name || ev.title || "").trim();
+              const desc = (ev.summary || "").replace(/<[^>]*>/g, "").slice(0, 250);
+              if (!name || !CIVIC_KW.test(name + " " + desc)) continue;
+              const date = ev.start_date || (ev.start?.utc || "").split("T")[0];
+              const time = (ev.start?.utc || "").split("T")[1]?.slice(0, 5) || "18:00";
+              const src = ev.url || pageUrl;
+              if (date && inWindow(date) && !events.find(e => e.source === src)) {
+                events.push({ name: name.slice(0, 100), type: detectEventType(name, desc), date, time, address: "Austin, TX", lat: 30.2672, lng: -97.7431, desc, source: src });
+              }
+            }
+          } catch(e) {}
+        }
+      } catch(e) { /* skip failed page */ }
+    }
+    return events.slice(0, 20);
+  } catch(e) { console.error("[Eventbrite Austin]", e.message); return []; }
+}
+
+// ── TRAVIS COUNTY COMMISSIONERS COURT ─────────────────────────────────────────
+async function scrapeTravisCountyCommissioners() {
+  try {
+    const res = await fetch("https://www.traviscountytx.gov/commissioners-court/agenda-calendar", {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; COMN-Civic-Bot/1.0)" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const events = [];
+    const seen = new Set();
+
+    // Look for meeting dates near "Commissioners Court" keyword
+    const meetingRe = /(\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2}|\w+\s+\d{1,2},?\s+\d{4})/g;
+    let m;
+    while ((m = meetingRe.exec(html)) !== null) {
+      const date = parseDate(m[1]);
+      if (!date || !inWindow(date) || seen.has(date)) continue;
+      // Confirm meeting context nearby
+      const ctx = html.slice(Math.max(0, m.index - 200), m.index + 200);
+      if (!/commissioners|court|meeting|agenda/i.test(ctx)) continue;
+      seen.add(date);
+      events.push({
+        name: "Travis County Commissioners Court Meeting",
+        type: "townhall",
+        date, time: "09:00",
+        address: "700 Lavaca St, Austin, TX 78701",
+        lat: 30.2695, lng: -97.7441,
+        desc: "Regular Travis County Commissioners Court meeting. Open to the public. Includes public comment period.",
+        source: "https://www.traviscountytx.gov/commissioners-court/agenda-calendar",
+      });
+    }
+    return events.slice(0, 10);
+  } catch(e) { console.error("[Travis County Commissioners]", e.message); return []; }
+}
+
+// ── WORDPRESS EVENTS CALENDAR HELPER ──────────────────────────────────────────
+// Generic helper: tries The Events Calendar REST API, then falls back to JSON-LD scraping.
+async function scrapeWordPressEventsCal(siteUrl, label) {
+  try {
+    const apiUrl = siteUrl.replace(/\/$/, "") + "/wp-json/tribe/events/v1/events?per_page=50&status=publish";
+    const res = await fetch(apiUrl, {
+      headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.netlify.app)" },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const evts = [];
+      for (const ev of (data.events || [])) {
+        const date = parseDate((ev.start_date || "").split(" ")[0]);
+        if (!date || !inWindow(date)) continue;
+        const time = (ev.start_date || "").split(" ")[1]?.slice(0, 5) || "10:00";
+        const name = (ev.title || label + " Event")
+          .replace(/&#(\d+);/g, (_, c) => String.fromCharCode(c))
+          .replace(/&amp;/g, "&").replace(/&nbsp;/g, " ")
+          .replace(/<[^>]*>/g, "").trim().slice(0, 100);
+        const desc = ((ev.description || ev.excerpt || "")
+          .replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim()).slice(0, 250);
+        const venue = ev.venue;
+        const addr = venue
+          ? `${venue.venue || ""} ${venue.address || ""} ${venue.city || "Austin"}, TX`.trim().replace(/\s+/g, " ")
+          : "Austin, TX";
+        evts.push({
+          name, type: detectEventType(name, desc),
+          date, time, address: addr,
+          lat: parseFloat(venue?.geo_lat) || 30.2672,
+          lng: parseFloat(venue?.geo_lng) || -97.7431,
+          desc, source: ev.url || siteUrl,
+        });
+      }
+      if (evts.length > 0) return evts;
+    }
+  } catch(e) { /* fall through to HTML */ }
+  // Fallback: JSON-LD in page HTML
+  try {
+    const html = await fetchHTML(siteUrl);
+    if (!html) return [];
+    const evts = [];
+    const ldRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = ldRe.exec(html)) !== null) {
+      try {
+        const raw = JSON.parse(m[1]);
+        const items = Array.isArray(raw) ? raw : (raw["@graph"] ? raw["@graph"] : [raw]);
+        for (const item of items) {
+          if (item["@type"] !== "Event") continue;
+          const name = (item.name || "").replace(/<[^>]*>/g, "").trim().slice(0, 100);
+          const desc = (item.description || "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 250);
+          if (!name) continue;
+          const start = item.startDate || "";
+          const date = parseDate(start.split("T")[0]);
+          if (!date || !inWindow(date)) continue;
+          const time = start.includes("T") ? start.split("T")[1].slice(0, 5) : "10:00";
+          const addr = item.location?.address?.streetAddress || item.location?.name || "Austin, TX";
+          evts.push({
+            name, type: detectEventType(name, desc),
+            date, time, address: addr,
+            lat: 30.2672, lng: -97.7431, desc, source: item.url || siteUrl,
+          });
+        }
+      } catch(e2) {}
+    }
+    return evts;
+  } catch(e) { return []; }
+}
+
+// ── TEXAS LEGISLATURE COMMITTEE HEARINGS ──────────────────────────────────────
+async function scrapeTXLegislature() {
+  try {
+    const events = [];
+    // Try XML hearing notice feed for current session (89th Legislature)
+    const xmlText = await fetchHTML("https://capitol.texas.gov/tlodocs/89R/schedulexml/hearing.xml");
+    if (xmlText) {
+      const hearingRe = /<hearing[^>]*>([\s\S]*?)<\/hearing>/gi;
+      const seen = new Set();
+      let m;
+      while ((m = hearingRe.exec(xmlText)) !== null) {
+        const chunk = m[1];
+        const dateM = chunk.match(/<date[^>]*>(.*?)<\/date>/i);
+        const timeM = chunk.match(/<time[^>]*>(.*?)<\/time>/i);
+        const commM  = chunk.match(/<committee[^>]*>(.*?)<\/committee>/i);
+        const roomM  = chunk.match(/<room[^>]*>(.*?)<\/room>/i);
+        if (!dateM) continue;
+        const date = parseDate(dateM[1]);
+        if (!date || !inWindow(date)) continue;
+        const committee = (commM?.[1] || "Committee").trim().replace(/&amp;/g, "&");
+        const key = `${committee}__${date}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const room = (roomM?.[1] || "").trim();
+        events.push({
+          name: `TX Legislature: ${committee}`.slice(0, 100),
+          type: "townhall", date,
+          time: timeM?.[1]?.slice(0, 5) || "09:00",
+          address: room ? `Texas State Capitol, ${room}, Austin, TX` : "Texas State Capitol, 1100 Congress Ave, Austin, TX 78701",
+          lat: 30.2747, lng: -97.7404,
+          desc: `Texas Legislature committee hearing — ${committee}. Open to public testimony.`,
+          source: "https://capitol.texas.gov/Committees/Committees.aspx",
+        });
+      }
+      if (events.length > 0) return events.slice(0, 15);
+    }
+    // Fallback: scrape the Committees page for date patterns
+    const html = await fetchHTML("https://capitol.texas.gov/Committees/Committees.aspx");
+    if (!html) return [];
+    const dateRe = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
+    const seen2 = new Set();
+    let m2;
+    while ((m2 = dateRe.exec(html)) !== null) {
+      const date = parseDate(m2[0]);
+      if (!date || !inWindow(date) || seen2.has(date)) continue;
+      const ctx = html.slice(Math.max(0, m2.index - 300), m2.index + 300);
+      if (!/committee|hearing|session/i.test(ctx)) continue;
+      seen2.add(date);
+      events.push({
+        name: "Texas Legislature Committee Hearing",
+        type: "townhall", date, time: "09:00",
+        address: "Texas State Capitol, 1100 Congress Ave, Austin, TX 78701",
+        lat: 30.2747, lng: -97.7404,
+        desc: "Texas Legislature public committee hearing. Open to the public — Austin, TX.",
+        source: "https://capitol.texas.gov/Committees/Committees.aspx",
+      });
+    }
+    return events.slice(0, 10);
+  } catch(e) { console.warn("[TX Legislature]", e.message); return []; }
+}
+
+// ── TEXAS TRIBUNE EVENTS ───────────────────────────────────────────────────────
+async function scrapeTexasTribune() {
+  try {
+    const html = await fetchHTML("https://www.texastribune.org/events/");
+    if (!html) return [];
+    const events = [];
+    const ldRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = ldRe.exec(html)) !== null) {
+      try {
+        const raw = JSON.parse(m[1]);
+        const items = Array.isArray(raw) ? raw : (raw["@graph"] ? raw["@graph"] : [raw]);
+        for (const item of items) {
+          if (item["@type"] !== "Event") continue;
+          const name = (item.name || "").replace(/<[^>]*>/g, "").trim().slice(0, 100);
+          const desc = (item.description || "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 250);
+          if (!name) continue;
+          const start = item.startDate || "";
+          const date = parseDate(start.split("T")[0]);
+          if (!date || !inWindow(date)) continue;
+          const time = start.includes("T") ? start.split("T")[1].slice(0, 5) : "18:00";
+          const addr = item.location?.address?.streetAddress || item.location?.name || "Austin, TX";
+          events.push({
+            name, type: detectEventType(name, desc),
+            date, time, address: addr,
+            lat: 30.2672, lng: -97.7431, desc,
+            source: item.url || "https://www.texastribune.org/events/",
+          });
+        }
+      } catch(e2) {}
+    }
+    // HTML fallback: look for event links
+    if (events.length === 0) {
+      const linkRe = /<a[^>]+href="(https:\/\/www\.texastribune\.org\/events\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+      let m2;
+      while ((m2 = linkRe.exec(html)) !== null) {
+        const srcUrl = m2[1];
+        const rawName = m2[2].replace(/<[^>]*>/g, "").trim().slice(0, 100);
+        if (!rawName || rawName.length < 5) continue;
+        const d = await fetchEventDetails(srcUrl);
+        if (!d.date || !inWindow(d.date)) continue;
+        events.push({
+          name: rawName, type: detectEventType(rawName, d.desc || ""),
+          date: d.date, time: d.time || "18:00",
+          address: d.address || "Austin, TX",
+          lat: d.lat || 30.2672, lng: d.lng || -97.7431,
+          desc: d.desc || "", source: srcUrl,
+        });
+        if (events.length >= 8) break;
+      }
+    }
+    return events.slice(0, 10);
+  } catch(e) { console.warn("[Texas Tribune]", e.message); return []; }
+}
+
+// ── AUSTIN ISD BOARD OF TRUSTEES ──────────────────────────────────────────────
+async function scrapeAISDBoard() {
+  try {
+    const html = await fetchHTML("https://www.austinisd.org/board/board-meetings-calendar");
+    if (!html) return [];
+    const events = [];
+    const seen = new Set();
+    const dateRe = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*202[67]/gi;
+    let m;
+    while ((m = dateRe.exec(html)) !== null) {
+      const date = parseDate(m[0]);
+      if (!date || !inWindow(date) || seen.has(date)) continue;
+      const ctx = html.slice(Math.max(0, m.index - 300), m.index + 300);
+      if (!/board|trustee|meeting|agenda/i.test(ctx)) continue;
+      seen.add(date);
+      events.push({
+        name: "Austin ISD Board of Trustees Meeting",
+        type: "townhall", date, time: "17:30",
+        address: "Austin ISD, 1111 West 6th Street, Austin, TX 78703",
+        lat: 30.2710, lng: -97.7577,
+        desc: "Regular public meeting of the Austin Independent School District Board of Trustees. Public comment available.",
+        source: "https://www.austinisd.org/board/board-meetings-calendar",
+      });
+    }
+    return events.slice(0, 10);
+  } catch(e) { console.warn("[AISD Board]", e.message); return []; }
+}
+
+// ── INDIVISIBLE AUSTIN ─────────────────────────────────────────────────────────
+async function scrapeIndivisibleAustin() {
+  return scrapeWordPressEventsCal("https://indivisibleaustin.com/events/", "Indivisible Austin");
+}
+
+// ── MOVE TX ────────────────────────────────────────────────────────────────────
+async function scrapeMoveTX() {
+  return scrapeWordPressEventsCal("https://movetx.org/events/", "Move TX");
+}
+
+// ── WORKERS DEFENSE PROJECT ────────────────────────────────────────────────────
+async function scrapeWorkersDefense() {
+  return scrapeWordPressEventsCal("https://workersdefense.org/events/", "Workers Defense Project");
+}
+
+// ── TEXAS ORGANIZING PROJECT ───────────────────────────────────────────────────
+async function scrapeTexasOrganizing() {
+  return scrapeWordPressEventsCal("https://organizetexas.org/events/", "Texas Organizing Project");
+}
+
+// ── TEXAS FREEDOM NETWORK ──────────────────────────────────────────────────────
+async function scrapeTexasFreedomNetwork() {
+  return scrapeWordPressEventsCal("https://tfn.org/events/", "Texas Freedom Network");
+}
+
+// ── TRAVIS COUNTY DEMOCRATS ────────────────────────────────────────────────────
+async function scrapeTravisCountyDems() {
+  return scrapeWordPressEventsCal("https://travisdemocrats.org/events/", "Travis County Democrats");
+}
+
+// ── SUNRISE AUSTIN ─────────────────────────────────────────────────────────────
+async function scrapeSunriseAustin() {
+  // Sunrise chapters may host events on sunrisemovement.org or their own ActionNetwork page
+  const evts = await scrapeWordPressEventsCal("https://www.sunrisemovement.org/hubs/austin", "Sunrise Austin");
+  if (evts.length > 0) return evts;
+  return scrapeWordPressEventsCal("https://austintx.sunrisemovement.org", "Sunrise Austin");
+}
+
+// ── TEXAS CIVIL RIGHTS PROJECT ────────────────────────────────────────────────
+async function scrapeTexasCivilRights() {
+  return scrapeWordPressEventsCal("https://texascivilrightsproject.org/events/", "TX Civil Rights Project");
+}
+
+// ── ACLU OF TEXAS ─────────────────────────────────────────────────────────────
+async function scrapeACLUTexas() {
+  try {
+    const html = await fetchHTML("https://www.aclutx.org/events");
+    if (!html) return [];
+    const events = [];
+    const ldRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = ldRe.exec(html)) !== null) {
+      try {
+        const raw = JSON.parse(m[1]);
+        const items = Array.isArray(raw) ? raw : (raw["@graph"] ? raw["@graph"] : [raw]);
+        for (const item of items) {
+          if (item["@type"] !== "Event") continue;
+          const name = (item.name || "").trim().slice(0, 100);
+          const desc = (item.description || "").replace(/<[^>]*>/g, "").trim().slice(0, 250);
+          if (!name) continue;
+          const start = item.startDate || "";
+          const date = parseDate(start.split("T")[0]);
+          if (!date || !inWindow(date)) continue;
+          const time = start.includes("T") ? start.split("T")[1].slice(0, 5) : "18:00";
+          const addr = item.location?.address?.streetAddress || item.location?.name || "Austin, TX";
+          events.push({
+            name, type: detectEventType(name, desc),
+            date, time, address: addr,
+            lat: 30.2672, lng: -97.7431, desc,
+            source: item.url || "https://www.aclutx.org/events",
+          });
+        }
+      } catch(e2) {}
+    }
+    if (events.length > 0) return events.slice(0, 10);
+    return scrapeWordPressEventsCal("https://www.aclutx.org", "ACLU Texas");
+  } catch(e) { console.warn("[ACLU Texas]", e.message); return []; }
+}
+
+// ── DO512 CIVIC CALENDAR ──────────────────────────────────────────────────────
+async function scrapeDo512() {
+  try {
+    const html = await fetchHTML("https://do512.com/events/category/civic");
+    if (!html) return [];
+    const events = [];
+    const ldRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = ldRe.exec(html)) !== null) {
+      try {
+        const raw = JSON.parse(m[1]);
+        const items = Array.isArray(raw) ? raw : (raw["@graph"] ? raw["@graph"] : [raw]);
+        for (const item of items) {
+          if (item["@type"] !== "Event") continue;
+          const name = (item.name || "").replace(/<[^>]*>/g, "").trim().slice(0, 100);
+          const desc = (item.description || "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 250);
+          if (!name || !CIVIC_KW.test(name + " " + desc)) continue;
+          const start = item.startDate || "";
+          const date = parseDate(start.split("T")[0]);
+          if (!date || !inWindow(date)) continue;
+          const time = start.includes("T") ? start.split("T")[1].slice(0, 5) : "19:00";
+          const addr = item.location?.address?.streetAddress || item.location?.name || "Austin, TX";
+          events.push({
+            name, type: detectEventType(name, desc),
+            date, time, address: addr,
+            lat: 30.2672, lng: -97.7431, desc,
+            source: item.url || "https://do512.com/events/category/civic",
+          });
+        }
+      } catch(e2) {}
+    }
+    return events.slice(0, 10);
+  } catch(e) { console.warn("[Do512]", e.message); return []; }
+}
+
+// ── LUMA AUSTIN CIVIC EVENTS ──────────────────────────────────────────────────
+async function scrapeLumaAustin() {
+  try {
+    // Luma embeds event data in __NEXT_DATA__ or JSON-LD
+    const html = await fetchHTML("https://lu.ma/austin");
+    if (!html) return [];
+    const events = [];
+    // Try JSON-LD first
+    const ldRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = ldRe.exec(html)) !== null) {
+      try {
+        const raw = JSON.parse(m[1]);
+        const items = Array.isArray(raw) ? raw : (raw["@graph"] ? raw["@graph"] : [raw]);
+        for (const item of items) {
+          if (item["@type"] !== "Event") continue;
+          const name = (item.name || "").replace(/<[^>]*>/g, "").trim().slice(0, 100);
+          const desc = (item.description || "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 250);
+          if (!name || !CIVIC_KW.test(name + " " + desc)) continue;
+          const start = item.startDate || "";
+          const date = parseDate(start.split("T")[0]);
+          if (!date || !inWindow(date)) continue;
+          const time = start.includes("T") ? start.split("T")[1].slice(0, 5) : "18:00";
+          events.push({
+            name, type: detectEventType(name, desc),
+            date, time,
+            address: item.location?.address?.streetAddress || item.location?.name || "Austin, TX",
+            lat: 30.2672, lng: -97.7431, desc,
+            source: item.url || "https://lu.ma/austin",
+          });
+        }
+      } catch(e2) {}
+    }
+    // Try __NEXT_DATA__ embedded JSON
+    if (events.length === 0) {
+      const nd = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+      if (nd) {
+        try {
+          const data = JSON.parse(nd[1]);
+          const evList = data?.props?.pageProps?.events || data?.props?.pageProps?.initialEvents || [];
+          for (const ev of evList) {
+            const name = (ev.name || ev.title || "").trim().slice(0, 100);
+            const desc = (ev.description || "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 250);
+            if (!name || !CIVIC_KW.test(name + " " + desc)) continue;
+            const date = parseDate(ev.start_at || ev.startDate || "");
+            if (!date || !inWindow(date)) continue;
+            const time = (ev.start_at || "").includes("T") ? ev.start_at.split("T")[1].slice(0, 5) : "18:00";
+            events.push({
+              name, type: detectEventType(name, desc),
+              date, time,
+              address: ev.geo_address_info?.full_address || ev.location || "Austin, TX",
+              lat: parseFloat(ev.lat) || 30.2672,
+              lng: parseFloat(ev.lng) || -97.7431,
+              desc, source: ev.url ? `https://lu.ma/${ev.url}` : "https://lu.ma/austin",
+            });
+          }
+        } catch(e2) {}
+      }
+    }
+    return events.slice(0, 10);
+  } catch(e) { console.warn("[Luma Austin]", e.message); return []; }
+}
+
 // ── DEDUPLICATION ─────────────────────────────────────────────────────────────
 function normalizeForDedup(name) {
   return (name || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
@@ -715,30 +1352,54 @@ async function runScraper() {
   const typeCounts = {};
 
   // Wrap each scraper with per-source error tracking
-  async function runSource(label, fn) {
+  async function runSource(id, label, fn) {
+    const t = Date.now();
     try {
       const results = await fn();
       perSource[label] = results.length;
       for (const e of results) typeCounts[e.type] = (typeCounts[e.type] || 0) + 1;
+      scrapeResults[id] = { lastRun: new Date().toISOString(), found: results.length, error: null, durationMs: Date.now() - t };
       return results;
     } catch(e) {
       console.error(`[${label}] scraper error:`, e.message);
       scrapeErrors.push(`${label} — ${e.message.slice(0, 120)}`);
       perSource[label] = 0;
+      scrapeResults[id] = { lastRun: new Date().toISOString(), found: 0, error: e.message.slice(0, 120), durationMs: Date.now() - t };
       return [];
     }
   }
 
   try {
-    const [council, voting, mobilize, handsOff, ajc, lwv] = await Promise.all([
-      runSource("City Council", scrapeCouncil),
-      runSource("Travis County Voting", scrapeVoting),
-      runSource("Mobilize", scrapeMobilize),
-      runSource("Hands Off Central TX", scrapeHandsOff),
-      runSource("Austin Justice Coalition", scrapeAJC),
-      runSource("LWV Austin", scrapeLWV),
+    const t0 = Date.now();
+    const [council, voting, mobilize, handsOff, ajc, lwv, austinCal, chronicle, eventbrite, travisCC,
+           txLeg, texasTrib, aisd, indivisible, moveTX, workersDef, texasOrg, tfn, tcDems, sunrise, txCivil, acluTX, do512, luma] = await Promise.all([
+      runSource("council",    "City Council",                 scrapeCouncil),
+      runSource("voting",     "Travis County Voting",         scrapeVoting),
+      runSource("mobilize",   "Mobilize",                     scrapeMobilize),
+      runSource("handsoff",   "Hands Off Central TX",         scrapeHandsOff),
+      runSource("ajc",        "Austin Justice Coalition",     scrapeAJC),
+      runSource("lwv",        "LWV Austin",                   scrapeLWV),
+      runSource("austincal",  "City of Austin Calendar",      scrapeAustinCityCalendar),
+      runSource("chronicle",  "Austin Chronicle",             scrapeAustinChronicle),
+      runSource("eventbrite", "Eventbrite Austin",            scrapeEventbriteAustin),
+      runSource("traviscc",   "Travis County Commissioners",  scrapeTravisCountyCommissioners),
+      runSource("txleg",      "Texas Legislature",            scrapeTXLegislature),
+      runSource("texastrib",  "Texas Tribune Events",         scrapeTexasTribune),
+      runSource("aisd",       "Austin ISD Board",             scrapeAISDBoard),
+      runSource("indivisible","Indivisible Austin",           scrapeIndivisibleAustin),
+      runSource("movetx",     "Move TX",                      scrapeMoveTX),
+      runSource("workersdef", "Workers Defense Project",      scrapeWorkersDefense),
+      runSource("top",        "Texas Organizing Project",     scrapeTexasOrganizing),
+      runSource("tfn",        "Texas Freedom Network",        scrapeTexasFreedomNetwork),
+      runSource("tcdemocrats","Travis County Democrats",      scrapeTravisCountyDems),
+      runSource("sunrise",    "Sunrise Austin",               scrapeSunriseAustin),
+      runSource("txcivil",    "TX Civil Rights Project",      scrapeTexasCivilRights),
+      runSource("aclutx",     "ACLU Texas",                   scrapeACLUTexas),
+      runSource("do512",      "Do512 Civic Calendar",         scrapeDo512),
+      runSource("luma",       "Luma Austin Events",           scrapeLumaAustin),
     ]);
-    const allFound = [...council, ...voting, ...mobilize, ...handsOff, ...ajc, ...lwv];
+    const allFound = [...council, ...voting, ...mobilize, ...handsOff, ...ajc, ...lwv, ...austinCal, ...chronicle, ...eventbrite, ...travisCC,
+                      ...txLeg, ...texasTrib, ...aisd, ...indivisible, ...moveTX, ...workersDef, ...texasOrg, ...tfn, ...tcDems, ...sunrise, ...txCivil, ...acluTX, ...do512, ...luma];
     console.log(`Found ${allFound.length} candidate events`);
 
     const existingEvents = await getExistingEventsForDedup();
@@ -1340,6 +2001,18 @@ app.get("/admin/stats", requireAuth, async (req, res) => {
 app.post("/admin/scrape-now", requireAuth, async (req, res) => {
   res.json({ message: "Scrape started — new events will appear in your queue shortly" });
   runScraper();
+});
+
+// ── SOURCES STATUS ────────────────────────────────────────────────────────────
+app.get("/admin/sources", requireAuth, (req, res) => {
+  const data = SOURCES.map(s => ({
+    ...s,
+    ...(scrapeResults[s.id] || { lastRun: null, found: null, error: null, durationMs: null }),
+    status: !scrapeResults[s.id] ? "never_run"
+          : scrapeResults[s.id].error ? "error"
+          : "ok",
+  }));
+  res.json(data);
 });
 
 // ── BUG REPORTS ───────────────────────────────────────────────────────────────
