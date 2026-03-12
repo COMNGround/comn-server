@@ -13,6 +13,7 @@ const AT_TABLE        = "Events";
 const AT_ADMINS_TABLE = "Admins";
 const AT_URL        = `https://api.airtable.com/v0/${AT_BASE}/${AT_TABLE}`;
 const AT_ADMINS_URL = `https://api.airtable.com/v0/${AT_BASE}/${AT_ADMINS_TABLE}`;
+const AT_SOURCES_URL = `https://api.airtable.com/v0/${AT_BASE}/Sources`;
 const AT_HEADS = { "Authorization": `Bearer ${AT_TOKEN}`, "Content-Type": "application/json" };
 
 const RESEND_KEY   = process.env.RESEND_KEY;
@@ -165,6 +166,15 @@ async function airtableAdmins(path, method = "GET", body = null) {
   const opts = { method, headers: AT_HEADS };
   if (body) opts.body = JSON.stringify(body);
   const res  = await fetch(`${AT_ADMINS_URL}${path}`, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
+  return data;
+}
+
+async function airtableSources(path, method = "GET", body = null) {
+  const opts = { method, headers: AT_HEADS };
+  if (body) opts.body = JSON.stringify(body);
+  const res  = await fetch(`${AT_SOURCES_URL}${path}`, opts);
   const data = await res.json();
   if (!res.ok) throw new Error(JSON.stringify(data));
   return data;
@@ -1457,6 +1467,46 @@ async function sendDigest(stats) {
   } catch(e) { console.error("Email failed:", e.message); }
 }
 
+// ── PUSH SCRAPE RESULTS TO AIRTABLE SOURCES TABLE ────────────────────────────
+async function updateSourcesAirtable() {
+  try {
+    // Fetch all Sources records to get their record IDs and URLs
+    const data = await airtableSources(`?fields[]=Name&fields[]=URL&pageSize=100`);
+    const records = data.records || [];
+
+    // Build URL → Airtable record ID map
+    const urlToRecordId = {};
+    for (const rec of records) {
+      if (rec.fields.URL) urlToRecordId[rec.fields.URL.trim()] = rec.id;
+    }
+
+    // Build batch update — one record per source
+    const updates = [];
+    for (const src of SOURCES) {
+      const recordId = urlToRecordId[src.url];
+      if (!recordId) continue;
+      const result = scrapeResults[src.id];
+      if (!result) continue;
+      updates.push({
+        id: recordId,
+        fields: {
+          "Last Run":      result.lastRun,
+          "Events Found":  result.found,
+          "Last Error":    result.error || null,
+        }
+      });
+    }
+
+    // Airtable PATCH accepts up to 10 records per request
+    for (let i = 0; i < updates.length; i += 10) {
+      await airtableSources("", "PATCH", { records: updates.slice(i, i + 10) });
+    }
+    console.log(`✅ Updated ${updates.length} Sources records in Airtable`);
+  } catch(e) {
+    console.error("Failed to update Sources in Airtable:", e.message);
+  }
+}
+
 // ── MAIN SCRAPE ───────────────────────────────────────────────────────────────
 async function runScraper() {
   console.log(`[${new Date().toISOString()}] Starting scrape...`);
@@ -1549,6 +1599,7 @@ async function runScraper() {
     } catch(e) {}
 
     await sendDigest({ newPending, totalPending, found: allFound.length, dupes, perSource, errors: scrapeErrors, typeCounts, reclassified: 0 });
+    await updateSourcesAirtable();
     console.log(`[${new Date().toISOString()}] Scrape complete.`);
     return { found: allFound.length, newPending, newDupes, totalPending };
   } catch(e) {
