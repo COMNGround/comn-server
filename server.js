@@ -304,29 +304,6 @@ async function scrapeCouncil() {
     }
   } catch(e) { console.warn("[City Council index]", e.message); }
 
-  // METHOD 2: Fallback — generate every-other-Thursday (Council typically meets bi-weekly)
-  console.warn("[City Council] Index page failed — generating schedule");
-  const d = new Date();
-  const end = new Date(); end.setMonth(end.getMonth() + 6);
-  // Move to next Thursday
-  while (d.getDay() !== 4) d.setDate(d.getDate() + 1);
-  let count = 0;
-  while (d <= end && count < 24) {
-    const date = d.toISOString().split("T")[0];
-    if (!seen.has(date)) {
-      seen.add(date);
-      events.push({
-        name: "Austin City Council Meeting",
-        type: "townhall", date, time: "10:00",
-        address: "Austin City Hall, 301 W. Second Street, Austin, TX 78701",
-        lat: 30.2636, lng: -97.7466,
-        desc: "Public meeting of the Austin City Council. Register to speak at austintexas.gov. Verify schedule at austintexas.gov before attending.",
-        source: "https://www.austintexas.gov/department/city-council",
-      });
-    }
-    d.setDate(d.getDate() + 14); // Every other Thursday
-    count++;
-  }
   return events;
 }
 
@@ -868,27 +845,6 @@ async function scrapeTravisCountyCommissioners() {
     }
   } catch(e) { console.warn("[Travis CC main page]", e.message); }
 
-  // METHOD 3: Programmatic — Commissioners Court meets EVERY TUESDAY at 9:00 AM
-  console.warn("[Travis CC] Falling back to programmatic Tuesday schedule");
-  const d = new Date();
-  const end = new Date(); end.setMonth(end.getMonth() + 6);
-  // Move to next Tuesday
-  while (d.getDay() !== 2) d.setDate(d.getDate() + 1);
-  while (d <= end && events.length < 26) {
-    const date = d.toISOString().split("T")[0];
-    if (!seen.has(date)) {
-      seen.add(date);
-      events.push({
-        name: "Travis County Commissioners Court Meeting",
-        type: "townhall", date, time: "09:00",
-        address: "700 Lavaca St, Austin, TX 78701",
-        lat: 30.2695, lng: -97.7441,
-        desc: "Travis County Commissioners Court meets every Tuesday at 9 AM. Open to the public with a public comment period. Verify specific dates at traviscountytx.gov.",
-        source: "https://www.traviscountytx.gov/commissioners-court",
-      });
-    }
-    d.setDate(d.getDate() + 7);
-  }
   return events;
 }
 
@@ -1120,37 +1076,6 @@ async function scrapeAISDBoard() {
     } catch(e) { /* try next */ }
   }
 
-  // METHOD 2: Programmatic — AISD Board meets 3rd Monday of each month at 5:30 PM
-  console.warn("[AISD Board] Falling back to programmatic 3rd-Monday schedule");
-  const now = new Date();
-  for (let mo = 0; mo < 7; mo++) {
-    const year = now.getFullYear();
-    const month = (now.getMonth() + mo) % 12;
-    const yearAdj = year + Math.floor((now.getMonth() + mo) / 12);
-    let mondayCount = 0;
-    for (let day = 1; day <= 31; day++) {
-      const dt = new Date(yearAdj, month, day);
-      if (dt.getMonth() !== month) break;
-      if (dt.getDay() === 1) { // Monday
-        mondayCount++;
-        if (mondayCount === 3) {
-          const date = dt.toISOString().split("T")[0];
-          if (date >= today() && !seen.has(date)) {
-            seen.add(date);
-            events.push({
-              name: "Austin ISD Board of Trustees Meeting",
-              type: "townhall", date, time: "17:30",
-              address: "Austin ISD, 1111 West 6th Street, Austin, TX 78703",
-              lat: 30.2710, lng: -97.7577,
-              desc: "Regular public meeting of the Austin ISD Board of Trustees (3rd Monday of month). Public comment available. Verify at austinisd.org.",
-              source: "https://www.austinisd.org/board-of-trustees",
-            });
-          }
-          break;
-        }
-      }
-    }
-  }
   return events;
 }
 
@@ -1190,87 +1115,10 @@ async function scrapeAustinPlanningCommission() {
     } catch(e) { /* try next */ }
   }
 
-  // Fallback: Planning Commission meets 2nd and 4th Tuesdays at 6 PM
-  const now = new Date();
-  const end = new Date(); end.setMonth(end.getMonth() + 6);
-  const d = new Date(now);
-  while (d.getDay() !== 2) d.setDate(d.getDate() + 1); // Next Tuesday
-  let week = 1;
-  let prevMonth = d.getMonth();
-  while (d <= end && events.length < 15) {
-    if (d.getMonth() !== prevMonth) { week = 1; prevMonth = d.getMonth(); }
-    if (week === 2 || week === 4) {
-      const date = d.toISOString().split("T")[0];
-      if (!seen.has(date)) {
-        seen.add(date);
-        events.push({
-          name: "Austin Planning Commission Meeting",
-          type: "townhall", date, time: "18:00",
-          address: "Austin City Hall, 301 W. Second Street, Austin, TX 78701",
-          lat: 30.2636, lng: -97.7466,
-          desc: "Austin Planning Commission meets 2nd and 4th Tuesdays. Reviews zoning and development cases. Public comment welcome. Verify at austintexas.gov.",
-          source: "https://www.austintexas.gov/department/planning-commission",
-        });
-      }
-    }
-    d.setDate(d.getDate() + 7);
-    week++;
-  }
   return events;
 }
 
-// ── AUSTIN WATER / ELECTRIC / OTHER CITY BOARDS (programmatic) ─────────────────
-async function scrapeAustinCityBoards() {
-  // Generate meetings for key city boards that meet on fixed schedules
-  const events = [];
-  const seen = new Set();
-  const now = new Date();
 
-  // Austin Water & Wastewater Commission — 1st Wednesday, 6 PM
-  // Austin Parks & Recreation Board — 2nd Monday, 6 PM  
-  // Austin Zoning Board of Adjustment — 1st Monday, 9 AM
-  // Electric Utility Commission — 3rd Wednesday, 6 PM
-  const boards = [
-    { name: "Austin Zoning Board of Adjustment Meeting",       dayOfWeek: 1, weekOfMonth: 1, time: "09:00", desc: "Austin Zoning Board of Adjustment (1st Monday). Reviews variance requests and zoning appeals. Public comment welcome." },
-    { name: "Austin Parks & Recreation Board Meeting",         dayOfWeek: 1, weekOfMonth: 2, time: "18:00", desc: "Austin Parks & Recreation Board (2nd Monday). Reviews parks policy and capital projects. Public comment welcome." },
-    { name: "Austin Water & Wastewater Commission Meeting",    dayOfWeek: 3, weekOfMonth: 1, time: "18:00", desc: "Austin Water & Wastewater Commission (1st Wednesday). Reviews water utility rates and policy." },
-    { name: "Austin Electric Utility Commission Meeting",      dayOfWeek: 3, weekOfMonth: 3, time: "18:00", desc: "Austin Electric Utility Commission (3rd Wednesday). Reviews Austin Energy policy, rates, and programs." },
-    { name: "Austin Transportation & Public Works Commission", dayOfWeek: 2, weekOfMonth: 3, time: "10:00", desc: "Austin Transportation & Public Works Commission (3rd Tuesday). Reviews transportation policy and infrastructure projects." },
-  ];
-
-  for (let mo = 0; mo < 6; mo++) {
-    const year = now.getFullYear();
-    const month = (now.getMonth() + mo) % 12;
-    const yearAdj = year + Math.floor((now.getMonth() + mo) / 12);
-
-    for (const board of boards) {
-      let weekCount = 0;
-      for (let day = 1; day <= 31; day++) {
-        const dt = new Date(yearAdj, month, day);
-        if (dt.getMonth() !== month) break;
-        if (dt.getDay() === board.dayOfWeek) {
-          weekCount++;
-          if (weekCount === board.weekOfMonth) {
-            const date = dt.toISOString().split("T")[0];
-            if (date >= today() && !seen.has(board.name + date)) {
-              seen.add(board.name + date);
-              events.push({
-                name: board.name,
-                type: "townhall", date, time: board.time,
-                address: "Austin City Hall, 301 W. Second Street, Austin, TX 78701",
-                lat: 30.2636, lng: -97.7466,
-                desc: board.desc + " Verify at austintexas.gov/boards-commissions.",
-                source: "https://www.austintexas.gov/boards-commissions",
-              });
-            }
-            break;
-          }
-        }
-      }
-    }
-  }
-  return events;
-}
 
 // ── INDIVISIBLE AUSTIN ─────────────────────────────────────────────────────────
 async function scrapeIndivisibleAustin() {
@@ -1637,7 +1485,7 @@ async function runScraper() {
   try {
     const t0 = Date.now();
     const [council, voting, mobilize, handsOff, ajc, lwv, austinCal, chronicle, eventbrite, travisCC,
-           txLeg, texasTrib, aisd, planningComm, cityBoards, indivisible, moveTX, workersDef, texasOrg, tfn, tcDems, sunrise, txCivil, acluTX, do512, luma] = await Promise.all([
+           txLeg, texasTrib, aisd, planningComm, indivisible, moveTX, workersDef, texasOrg, tfn, tcDems, sunrise, txCivil, acluTX, do512, luma] = await Promise.all([
       runSource("council",      "City Council",                   scrapeCouncil),
       runSource("voting",       "Travis County Voting",           scrapeVoting),
       runSource("mobilize",     "Mobilize",                       scrapeMobilize),
@@ -1652,7 +1500,6 @@ async function runScraper() {
       runSource("texastrib",    "Texas Tribune Events",           scrapeTexasTribune),
       runSource("aisd",         "Austin ISD Board",               scrapeAISDBoard),
       runSource("planningcomm", "Austin Planning Commission",     scrapeAustinPlanningCommission),
-      runSource("cityboards",   "Austin City Boards",             scrapeAustinCityBoards),
       runSource("indivisible",  "Indivisible Austin",             scrapeIndivisibleAustin),
       runSource("movetx",       "Move TX",                        scrapeMoveTX),
       runSource("workersdef",   "Workers Defense Project",        scrapeWorkersDefense),
@@ -1666,7 +1513,7 @@ async function runScraper() {
       runSource("luma",         "Luma Austin Events",             scrapeLumaAustin),
     ]);
     const allFound = [...council, ...voting, ...mobilize, ...handsOff, ...ajc, ...lwv, ...austinCal, ...chronicle, ...eventbrite, ...travisCC,
-                      ...txLeg, ...texasTrib, ...aisd, ...planningComm, ...cityBoards, ...indivisible, ...moveTX, ...workersDef, ...texasOrg, ...tfn, ...tcDems, ...sunrise, ...txCivil, ...acluTX, ...do512, ...luma];
+                      ...txLeg, ...texasTrib, ...aisd, ...planningComm, ...indivisible, ...moveTX, ...workersDef, ...texasOrg, ...tfn, ...tcDems, ...sunrise, ...txCivil, ...acluTX, ...do512, ...luma];
     console.log(`Found ${allFound.length} candidate events`);
 
     const existingEvents = await getExistingEventsForDedup();
