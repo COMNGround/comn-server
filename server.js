@@ -24,15 +24,15 @@ if (!process.env.JWT_SECRET) console.warn("[WARN] JWT_SECRET env var not set —
 
 // ── SOURCES REGISTRY ──────────────────────────────────────────────────────────
 const SOURCES = [
-  { id: "council",    label: "Austin City Council",          url: "https://www.austintexas.gov/calendar",                 type: "government", desc: "Austin city government meetings and public hearings" },
+  { id: "council",    label: "Austin City Council",          url: "https://www.austintexas.gov/fullcalendar",             type: "government", desc: "Austin city government meetings and public hearings" },
   { id: "voting",     label: "Travis County Voting",         url: "https://votetravis.gov",                               type: "government", desc: "Travis County elections and voting information" },
   { id: "mobilize",   label: "Mobilize.us",                  url: "https://api.mobilize.us/v1/events",                    type: "platform",   desc: "Civic engagement events near Austin (50-mile radius)" },
   { id: "handsoff",   label: "Hands Off Central TX",         url: "https://handsoffcentraltx.org/events",                 type: "nonprofit",  desc: "Austin-area advocacy and civic events" },
-  { id: "ajc",        label: "Austin Justice Coalition",     url: "https://austinjustice.org/events",                     type: "nonprofit",  desc: "Criminal justice and equity events" },
-  { id: "lwv",        label: "LWV Austin",                   url: "https://lwvaustin.org/events",                         type: "nonprofit",  desc: "League of Women Voters Austin civic education events" },
-  { id: "austincal",  label: "City of Austin Open Calendar", url: "https://www.austintexas.gov/calendar",                 type: "government", desc: "All public city events, programs, and government meetings" },
+  { id: "ajc",        label: "Austin Justice Coalition",     url: "https://austinjustice.org/events/",                    type: "nonprofit",  desc: "Criminal justice and equity events" },
+  { id: "lwv",        label: "LWV Austin",                   url: "https://lwvaustin.org/content.aspx?page_id=4001&club_id=334869", type: "nonprofit", desc: "League of Women Voters Austin civic education events" },
+  { id: "austincal",  label: "City of Austin Open Calendar", url: "https://www.austintexas.gov/department/volunteer-city-austin", type: "government", desc: "All public city events, programs, and government meetings" },
   { id: "chronicle",  label: "Austin Chronicle Events",      url: "https://www.austinchronicle.com/events/",              type: "media",      desc: "Austin Chronicle calendar — civic events only (keyword filtered)" },
-  { id: "eventbrite", label: "Eventbrite Austin",            url: "https://www.eventbrite.com/d/tx--austin/community/",   type: "platform",   desc: "Community and civic events on Eventbrite — keyword filtered" },
+  { id: "eventbrite", label: "Eventbrite Austin",            url: "https://www.eventbrite.com/d/tx--austin/community/",   type: "platform",   desc: "Community and civic events on Eventbrite" },
   { id: "traviscc",   label: "Travis County Commissioners",  url: "https://www.traviscountytx.gov/commissioners-court",   type: "government", desc: "Travis County Commissioners Court meetings and hearings" },
   { id: "txleg",      label: "Texas Legislature",            url: "https://capitol.texas.gov/Committees/Committees.aspx", type: "government", desc: "Texas Legislature committee hearings and public sessions" },
   { id: "texastrib",  label: "Texas Tribune Events",         url: "https://www.texastribune.org/events/",                type: "media",      desc: "Texas Tribune civic journalism events, panels, and forums" },
@@ -42,7 +42,7 @@ const SOURCES = [
   { id: "workersdef", label: "Workers Defense Project",      url: "https://workersdefense.org/events/",                  type: "nonprofit",  desc: "Workers Defense Project labor rights events in Austin" },
   { id: "top",        label: "Texas Organizing Project",     url: "https://organizetexas.org/events/",                   type: "nonprofit",  desc: "Texas Organizing Project community organizing events" },
   { id: "tfn",        label: "Texas Freedom Network",        url: "https://tfn.org/events/",                             type: "nonprofit",  desc: "Texas Freedom Network civil liberties and education events" },
-  { id: "tcdemocrats",label: "Travis County Democrats",      url: "https://travisdemocrats.org/events/",                 type: "nonprofit",  desc: "Travis County Democratic Party meetings and civic events" },
+  { id: "tcdemocrats",label: "Travis County Democrats",      url: "https://www.mobilize.us/traviscountydems/",            type: "nonprofit",  desc: "Travis County Democratic Party meetings and civic events" },
   { id: "sunrise",    label: "Sunrise Austin",               url: "https://www.sunrisemovement.org/hubs/austin",         type: "nonprofit",  desc: "Sunrise Movement Austin climate action events" },
   { id: "txcivil",    label: "TX Civil Rights Project",      url: "https://texascivilrightsproject.org/events/",         type: "nonprofit",  desc: "Texas Civil Rights Project advocacy events and workshops" },
   { id: "aclutx",     label: "ACLU Texas",                   url: "https://www.aclutx.org/events",                       type: "nonprofit",  desc: "ACLU of Texas civil liberties events and advocacy actions" },
@@ -344,12 +344,13 @@ async function scrapeMobilize() {
   try {
     const nowTs = Math.floor(Date.now() / 1000);
     const res = await fetch(
-      `https://api.mobilize.us/v1/events?zipcode=78701&radius=50&timeslot_start=${nowTs}&timeslot_start_min=${nowTs}&per_page=100&visibility=PUBLIC&order_by=timeslot_start`,
-      { headers: { "User-Agent": "COMN-Civic-Bot/1.0" }, signal: AbortSignal.timeout(12000) }
+      `https://api.mobilize.us/v1/events?zipcode=78701&radius=50&timeslot_start_min=${nowTs}&per_page=150&visibility=PUBLIC&order_by=timeslot_start`,
+      { headers: { "User-Agent": "COMN-Civic-Bot/1.0" }, signal: AbortSignal.timeout(15000) }
     );
     if (!res.ok) return [];
     const data = await res.json();
-    const base = (data.data || [])
+    // Use API data directly — no per-event deep-linking (was causing 100+ sequential fetches)
+    return (data.data || [])
       .filter(e => e.timeslots?.length > 0)
       .map(e => {
         const ts = e.timeslots[0];
@@ -357,9 +358,9 @@ async function scrapeMobilize() {
         const time = ts?.start_date ? new Date(ts.start_date * 1000).toTimeString().slice(0,5) : "10:00";
         const isVirtual = e.is_virtual || e.location?.is_virtual;
         const rawDesc = (e.description || "").replace(/<[^>]*>/g,"").replace(/\s+/g," ").trim();
+        const name = (e.title || "Austin Civic Event").slice(0,100);
         return {
-          name: (e.title || "Austin Civic Event").slice(0,100),
-          type: "nonprofit", // will be overridden by detectEventType below
+          name, type: detectEventType(name, rawDesc),
           date, time,
           address: isVirtual ? "Online" : (e.location?.venue || e.location?.address_lines?.[0] || "Austin, TX"),
           lat: isVirtual ? 0 : (parseFloat(e.location?.lat) || 30.2672),
@@ -369,23 +370,6 @@ async function scrapeMobilize() {
         };
       })
       .filter(e => e.date && inWindow(e.date));
-
-    // Deep-link each event for accurate details
-    const enriched = [];
-    for (const ev of base) {
-      if (ev.source) {
-        const d = await fetchEventDetails(ev.source);
-        if (d.date && inWindow(d.date)) ev.date = d.date;
-        if (d.time) ev.time = d.time;
-        if (d.address && d.address.length > 5) ev.address = d.address;
-        if (d.lat) ev.lat = d.lat;
-        if (d.lng) ev.lng = d.lng;
-        if (d.desc && d.desc.length > 20) ev.desc = d.desc;
-      }
-      ev.type = detectEventType(ev.name, ev.desc);
-      if (ev.date && inWindow(ev.date)) enriched.push(ev);
-    }
-    return enriched;
   } catch(e) { console.warn("Mobilize scrape failed:", e.message); return []; }
 }
 
@@ -613,7 +597,7 @@ async function scrapeLWV() {
 }
 
 // ── CIVIC KEYWORD FILTER (for broad platform/media sources) ───────────────────
-const CIVIC_KW = /\b(town hall|townhall|city council|county|public hearing|community meeting|nonprofit|voter|voting|election|runoff|primary|rally|march|protest|vigil|civil rights|civic|community forum|neighborhood meeting|district|legislature|legislative|policy|advocacy|social justice|equity|climate|housing|public safety|candidate|political action|community org|volunteer|activism|ballot|commissioner|school board)\b/i;
+const CIVIC_KW = /\b(town hall|townhall|city council|county|public hearing|community meeting|community convening|community forum|community gathering|community summit|nonprofit|voter|voting|election|runoff|primary|rally|march|protest|vigil|civil rights|civic|neighborhood meeting|neighborhood|district|legislature|legislative|policy|advocacy|social justice|equity|climate|housing|public safety|candidate|political action|community org|volunteer|activism|ballot|commissioner|school board|community|convening|summit|forum|workshop|organizing|mutual aid|coalition|town meeting|open house|town hall meeting|public meeting|community event|gathering|action network)\b/i;
 
 // ── CITY OF AUSTIN OPEN CALENDAR ──────────────────────────────────────────────
 async function scrapeAustinCityCalendar() {
@@ -729,66 +713,65 @@ async function scrapeAustinChronicle() {
 async function scrapeEventbriteAustin() {
   try {
     const pages = [
-      "https://www.eventbrite.com/d/tx--austin/community--civic/",
+      "https://www.eventbrite.com/d/tx--austin/community/",
       "https://www.eventbrite.com/d/tx--austin/nonprofit--charity/",
+      "https://www.eventbrite.com/d/tx--austin/government/",
     ];
     const events = [];
+    const seenSrc = new Set();
+
     for (const pageUrl of pages) {
       try {
         const res = await fetch(pageUrl, {
-          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" },
-          signal: AbortSignal.timeout(12000),
+          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" },
+          signal: AbortSignal.timeout(15000),
         });
         if (!res.ok) continue;
         const html = await res.text();
 
-        // JSON-LD (most reliable when present)
-        const jsonLdRe = /<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
-        let m;
-        while ((m = jsonLdRe.exec(html)) !== null) {
-          try {
-            const raw = JSON.parse(m[1]);
-            const items = Array.isArray(raw) ? raw : [raw];
-            for (const item of items) {
-              if (item["@type"] !== "Event") continue;
-              const name = (item.name || "").trim();
-              const desc = (item.description || "").replace(/<[^>]*>/g, "").slice(0, 250);
-              if (!CIVIC_KW.test(name + " " + desc)) continue;
-              const startDate = item.startDate || "";
-              const date = startDate.split("T")[0];
-              const time = startDate.includes("T") ? startDate.split("T")[1].slice(0, 5) : "18:00";
-              const isVirtual = (item.eventAttendanceMode || "").includes("Online") || /\b(virtual|online|zoom|webinar)\b/i.test(name + desc);
-              const addr = isVirtual ? "Online" : (item.location?.address?.streetAddress || item.location?.name || "Austin, TX");
-              const src = item.url || pageUrl;
-              if (name && date && inWindow(date) && !events.find(e => e.source === src)) {
-                events.push({ name: name.slice(0, 100), type: detectEventType(name, desc), date, time, address: addr, lat: isVirtual ? 0 : 30.2672, lng: isVirtual ? 0 : -97.7431, desc, source: src });
+        // Extract __SERVER_DATA__ using indexOf to avoid regex length limits
+        const sdMarker = html.indexOf("window.__SERVER_DATA__");
+        if (sdMarker !== -1) {
+          const jsonStart = html.indexOf("{", sdMarker);
+          const scriptEnd = html.indexOf("</script>", sdMarker);
+          if (jsonStart !== -1 && scriptEnd !== -1 && jsonStart < scriptEnd) {
+            // Strip trailing semicolon/whitespace before </script>
+            const raw = html.slice(jsonStart, scriptEnd).replace(/;\s*$/, "").trim();
+            try {
+              const sd = JSON.parse(raw);
+              const evList = sd?.search_data?.events?.results || [];
+              for (const ev of evList) {
+                // Eventbrite community pages are pre-filtered — no CIVIC_KW needed
+                const name = (ev.name?.text || ev.name || ev.title || "").trim();
+                const desc = (ev.summary || ev.description?.text || "").replace(/<[^>]*>/g, "").slice(0, 250);
+                if (!name) continue;
+                const startLocal = ev.start?.local || ev.start_date || "";
+                const date = startLocal ? startLocal.split("T")[0] : null;
+                const time = startLocal?.includes("T") ? startLocal.split("T")[1].slice(0, 5) : "18:00";
+                if (!date || !inWindow(date)) continue;
+                const isVirtual = ev.is_online_event || /\b(virtual|online|zoom|webinar)\b/i.test(name + " " + desc);
+                const venue = ev.primary_venue || ev.venue || {};
+                const addr = isVirtual ? "Online"
+                  : (venue.address?.localized_address_display || venue.name || "Austin, TX");
+                const src = ev.url || pageUrl;
+                if (!seenSrc.has(src)) {
+                  seenSrc.add(src);
+                  events.push({
+                    name: name.slice(0, 100), type: detectEventType(name, desc),
+                    date, time, address: addr,
+                    lat: isVirtual ? 0 : (parseFloat(venue.address?.latitude) || 30.2672),
+                    lng: isVirtual ? 0 : (parseFloat(venue.address?.longitude) || -97.7431),
+                    desc, source: src,
+                  });
+                }
               }
-            }
-          } catch(e) {}
+              console.log(`[Eventbrite ${pageUrl.split("/").slice(-2,-1)}] ${evList.length} raw → ${events.length} so far`);
+            } catch(e) { console.warn("[Eventbrite] JSON parse error:", e.message.slice(0,60)); }
+          }
         }
-
-        // Embedded JSON fallback (__SERVER_DATA__ or __ebInit__)
-        const serverDataM = /window\.__SERVER_DATA__\s*=\s*(\{[\s\S]{0,50000}?\});\s*(?:<\/script>|window\.)/.exec(html);
-        if (serverDataM) {
-          try {
-            const sd = JSON.parse(serverDataM[1]);
-            const evList = sd?.search_data?.events?.results || sd?.events || [];
-            for (const ev of evList) {
-              const name = (ev.name || ev.title || "").trim();
-              const desc = (ev.summary || "").replace(/<[^>]*>/g, "").slice(0, 250);
-              if (!name || !CIVIC_KW.test(name + " " + desc)) continue;
-              const date = ev.start_date || (ev.start?.utc || "").split("T")[0];
-              const time = (ev.start?.utc || "").split("T")[1]?.slice(0, 5) || "18:00";
-              const src = ev.url || pageUrl;
-              if (date && inWindow(date) && !events.find(e => e.source === src)) {
-                events.push({ name: name.slice(0, 100), type: detectEventType(name, desc), date, time, address: "Austin, TX", lat: 30.2672, lng: -97.7431, desc, source: src });
-              }
-            }
-          } catch(e) {}
-        }
-      } catch(e) { /* skip failed page */ }
+      } catch(e) { console.warn("[Eventbrite page]", e.message); }
     }
-    return events.slice(0, 20);
+    return events.slice(0, 50);
   } catch(e) { console.error("[Eventbrite Austin]", e.message); return []; }
 }
 
@@ -1157,7 +1140,38 @@ async function scrapeTexasFreedomNetwork() {
 
 // ── TRAVIS COUNTY DEMOCRATS ────────────────────────────────────────────────────
 async function scrapeTravisCountyDems() {
-  return scrapeWordPressEventsCal("https://travisdemocrats.org/events/", "Travis County Democrats");
+  try {
+    // travisdemocrats.org domain is down — use Mobilize org API (org ID 903046)
+    const nowTs = Math.floor(Date.now() / 1000);
+    const res = await fetch(
+      `https://api.mobilize.us/v1/organizations/903046/events?timeslot_start_min=${nowTs}&per_page=50&visibility=PUBLIC`,
+      { headers: { "User-Agent": "COMN-Civic-Bot/1.0" }, signal: AbortSignal.timeout(10000) }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return (data.data || [])
+      .filter(e => e.timeslots?.length > 0)
+      .map(e => {
+        const ts = e.timeslots[0];
+        const date = ts?.start_date ? new Date(ts.start_date * 1000).toISOString().split("T")[0] : null;
+        const time = ts?.start_date ? new Date(ts.start_date * 1000).toTimeString().slice(0,5) : "18:00";
+        const rawDesc = (e.description || "").replace(/<[^>]*>/g,"").replace(/\s+/g," ").trim();
+        const name = (e.title || "Travis County Democrats Event").slice(0,100);
+        return {
+          name, type: detectEventType(name, rawDesc),
+          date, time,
+          address: e.location?.venue || e.location?.address_lines?.[0] || "Austin, TX",
+          lat: parseFloat(e.location?.lat) || 30.2672,
+          lng: parseFloat(e.location?.lon) || -97.7431,
+          desc: rawDesc.slice(0,250),
+          source: e.browser_url || "https://www.mobilize.us/traviscountydems/",
+        };
+      })
+      .filter(e => e.date && inWindow(e.date));
+  } catch(e) {
+    console.warn("[Travis County Dems]", e.message);
+    return [];
+  }
 }
 
 // ── SUNRISE AUSTIN ─────────────────────────────────────────────────────────────
