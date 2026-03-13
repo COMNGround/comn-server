@@ -1468,35 +1468,51 @@ async function sendDigest(stats) {
 }
 
 // ── PUSH SCRAPE RESULTS TO AIRTABLE SOURCES TABLE ────────────────────────────
+// Hardcoded source-id → Airtable record-id map (avoids fragile URL matching)
+const SOURCE_RECORD_MAP = {
+  council:    "recOXeJLmJ1HBryOi",
+  voting:     "recyanqHetlni9sFI",
+  mobilize:   "recSkk3f47j2ZoHQZ",
+  handsoff:   "rec8mZ5fSIdoaK4lw",
+  ajc:        "recAGWJ8wyAcZHQVP",
+  lwv:        "reczgm6pO2eNKVom3",
+  austincal:  "recbUzCtB90LNk65N",
+  chronicle:  "recGgy1uN3Yluu50X",
+  eventbrite: "recIUzhudwtJ7NGrg",
+  traviscc:   "recDwNPrueswMTVrq",
+  txleg:      "rec4jgqEHRgnWP2ee",
+  texastrib:  "recCLCEufN7wNZ5XS",
+  aisd:       "recbUB6jQVc7Cggtw",
+  planningcomm: null, // not yet in Airtable Sources table
+  indivisible:"recRkWeNkwRnpd4pc",
+  movetx:     "recpLbLmItIyz5KPL",
+  workersdef: "recy1F4sv18fDmFgr",
+  top:        "recYwvS5QrIUeCNJx",
+  tfn:        "recZdczNabHsoQSED",
+  tcdemocrats:"rec7iJqQjOsnRSsL1",
+  sunrise:    "recCjMA9MYEnfDGeE",
+  txcivil:    "recpugTKJNUscynzI",
+  aclutx:     "recpqr6BLTUAnqaOM",
+  do512:      "reckFuPzVm7PiKrdx",
+  luma:       "recuG8dlZ13mYikQ0",
+};
+
 async function updateSourcesAirtable() {
   try {
-    // Fetch all Sources records to get their record IDs and URLs
-    const data = await airtableSources(`?fields[]=Name&fields[]=URL&pageSize=100`);
-    const records = data.records || [];
-
-    // Build URL → Airtable record ID map
-    const urlToRecordId = {};
-    for (const rec of records) {
-      if (rec.fields.URL) urlToRecordId[rec.fields.URL.trim()] = rec.id;
-    }
-
-    // Build batch update — one record per source
     const updates = [];
-    for (const src of SOURCES) {
-      const recordId = urlToRecordId[src.url];
+    for (const [id, recordId] of Object.entries(SOURCE_RECORD_MAP)) {
       if (!recordId) continue;
-      const result = scrapeResults[src.id];
+      const result = scrapeResults[id];
       if (!result) continue;
       updates.push({
         id: recordId,
         fields: {
-          "Last Run":      result.lastRun,
-          "Events Found":  result.found,
-          "Last Error":    result.error || null,
+          "Last Run":     result.lastRun,
+          "Events Found": result.found,
+          "Last Error":   result.error || null,
         }
       });
     }
-
     // Airtable PATCH accepts up to 10 records per request
     for (let i = 0; i < updates.length; i += 10) {
       await airtableSources("", "PATCH", { records: updates.slice(i, i + 10) });
