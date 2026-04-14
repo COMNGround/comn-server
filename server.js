@@ -18,7 +18,7 @@ const AT_HEADS = { "Authorization": `Bearer ${AT_TOKEN}`, "Content-Type": "appli
 
 const RESEND_KEY   = process.env.RESEND_KEY;
 const DIGEST_EMAIL = process.env.DIGEST_EMAIL || "bywilliamcole@gmail.com";
-const ADMIN_URL    = "https://comnground.netlify.app/admin.html";
+const ADMIN_URL    = "https://comnground.net/admin.html";
 const JWT_SECRET = process.env.JWT_SECRET || "comn-dev-jwt-secret-CHANGE-IN-PROD";
 if (!process.env.JWT_SECRET) console.warn("[WARN] JWT_SECRET env var not set — using insecure default. Set it in Railway before going to production.");
 
@@ -93,7 +93,7 @@ async function getInviteToken() {
   return token;
 }
 
-app.use(cors({ origin: ["https://comnground.netlify.app", "https://comn-server-production.up.railway.app", "http://localhost:3000", "http://localhost:8080"] }));
+app.use(cors({ origin: ["https://comnground.net", "https://comn-server-production.up.railway.app", "http://localhost:3000", "http://localhost:8080"] }));
 app.use(express.json());
 
 // ── CONTENT HELPERS ───────────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ function detectEventType(name, desc) {
 async function fetchHTML(url) {
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.netlify.app)" },
+      headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.net)" },
       signal: AbortSignal.timeout(12000),
     });
     if (!res.ok) return null;
@@ -379,7 +379,7 @@ async function scrapeHandsOff() {
   // METHOD 1: Squarespace JSON API
   try {
     const res = await fetch(`${BASE}/events?format=json`, {
-      headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.netlify.app)" },
+      headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.net)" },
       signal: AbortSignal.timeout(12000),
     });
     if (res.ok) {
@@ -603,7 +603,7 @@ const CIVIC_KW = /\b(town hall|townhall|city council|county|public hearing|commu
 async function scrapeAustinCityCalendar() {
   try {
     const res = await fetch("https://www.austintexas.gov/calendar", {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; COMN-Civic-Bot/1.0; +https://comnground.netlify.app)" },
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; COMN-Civic-Bot/1.0; +https://comnground.net)" },
       signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) return [];
@@ -847,7 +847,7 @@ async function scrapeWordPressEventsCal(siteUrl, label) {
   try {
     const apiUrl = siteUrl.replace(/\/$/, "") + "/wp-json/tribe/events/v1/events?per_page=50&status=publish";
     const res = await fetch(apiUrl, {
-      headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.netlify.app)" },
+      headers: { "User-Agent": "COMN-Civic-Bot/1.0 (comnground.net)" },
       signal: AbortSignal.timeout(10000),
     });
     if (res.ok) {
@@ -1747,7 +1747,7 @@ app.post("/submit", async (req, res) => {
           `<p>Thanks for submitting to COMN — Common Ground!</p>
            <p>Your event <strong>${eventName}</strong> is now under review by our team. We'll notify you when it's approved or if we need more information.</p>
            <p>Events are typically reviewed within 24 hours.</p>
-           <p style="color:#888;font-size:12px">— The COMN Team | <a href="https://comnground.netlify.app">comnground.netlify.app</a></p>`
+           <p style="color:#888;font-size:12px">— The COMN Team | <a href="https://comnground.net">comnground.net</a></p>`
         ).catch(() => {});
       }
     }
@@ -1934,7 +1934,7 @@ app.get("/admin/invite-token", requireAuth, async (req, res) => {
     return res.status(403).json({ error: "Super Admin only" });
   try {
     const token = await getInviteToken();
-    res.json({ token, link: `https://comnground.netlify.app/admin.html?invite=${token}` });
+    res.json({ token, link: `https://comnground.net/admin.html?invite=${token}` });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1951,7 +1951,7 @@ app.post("/admin/invite-token/regenerate", requireAuth, async (req, res) => {
     } else {
       await airtableAdmins("", "POST", { records: [{ fields: { Email: "_invite_token", DisplayName: newToken, Role: "invite_token" } }] });
     }
-    res.json({ token: newToken, link: `https://comnground.netlify.app/admin.html?invite=${newToken}` });
+    res.json({ token: newToken, link: `https://comnground.net/admin.html?invite=${newToken}` });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2032,7 +2032,7 @@ app.patch("/admin/events/:id", requireAuth, async (req, res) => {
            <p>Thank you for submitting to COMN — Common Ground.</p>
            <p>Unfortunately, our team was unable to approve <strong>${escHtml(evName)}</strong> at this time.</p>
            ${reason ? `<p><strong>Reason:</strong> ${escHtml(reason)}</p>` : ""}
-           <p>You're welcome to make changes and resubmit at <a href="https://comnground.netlify.app">comnground.netlify.app</a>.</p>
+           <p>You're welcome to make changes and resubmit at <a href="https://comnground.net">comnground.net</a>.</p>
            <p style="color:#888;font-size:12px">— The COMN Team</p>`
         ).catch(() => {});
       }
