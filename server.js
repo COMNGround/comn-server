@@ -1642,11 +1642,11 @@ async function runScraper() {
 let lastScrapeHour = "";
 setInterval(() => {
   const now = new Date();
-  const hourKey = now.toISOString().slice(0, 13); // "2026-03-12T15" — unique per hour
-  if (hourKey !== lastScrapeHour) {
-    lastScrapeHour = hourKey;
-    const ctHour = (now.getUTCHours() - 5 + 24) % 24;
-    console.log(`⏰ Hourly scrape — ${now.toISOString()} (${ctHour}:00 CT)`);
+  const ctHour = parseInt(new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hour: "numeric", hour12: false }).format(now));
+  const dayKey = now.toISOString().slice(0, 10); // "2026-03-12" — unique per day
+  if (ctHour === 8 && dayKey !== lastScrapeHour) {
+    lastScrapeHour = dayKey;
+    console.log(`⏰ Daily scrape — ${now.toISOString()} (8:00 CT)`);
     runScraper();
   }
 }, 60 * 1000);
@@ -1656,7 +1656,7 @@ setInterval(() => {
 // ══════════════════════════════════════════════════════════════════════════════
 
 app.get("/", (req, res) =>
-  res.json({ status: "COMN server running", nextScrape: "Hourly" })
+  res.json({ status: "COMN server running", nextScrape: "Daily 8am CT" })
 );
 
 // ── PUBLIC EVENTS ─────────────────────────────────────────────────────────────
