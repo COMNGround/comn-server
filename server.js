@@ -13,7 +13,8 @@ const AT_TABLE        = "Events";
 const AT_ADMINS_TABLE = "Admins";
 const AT_URL        = `https://api.airtable.com/v0/${AT_BASE}/${AT_TABLE}`;
 const AT_ADMINS_URL = `https://api.airtable.com/v0/${AT_BASE}/${AT_ADMINS_TABLE}`;
-const AT_SOURCES_URL = `https://api.airtable.com/v0/${AT_BASE}/Sources`;
+const AT_SOURCES_URL   = `https://api.airtable.com/v0/${AT_BASE}/Sources`;
+const AT_PAST_URL      = `https://api.airtable.com/v0/${AT_BASE}/Past%20Events`;
 const AT_HEADS = { "Authorization": `Bearer ${AT_TOKEN}`, "Content-Type": "application/json" };
 
 const RESEND_KEY   = process.env.RESEND_KEY;
@@ -175,6 +176,15 @@ async function airtableSources(path, method = "GET", body = null) {
   const opts = { method, headers: AT_HEADS };
   if (body) opts.body = JSON.stringify(body);
   const res  = await fetch(`${AT_SOURCES_URL}${path}`, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
+  return data;
+}
+
+async function airtablePastEvents(path, method = "GET", body = null) {
+  const opts = { method, headers: AT_HEADS };
+  if (body) opts.body = JSON.stringify(body);
+  const res  = await fetch(`${AT_PAST_URL}${path}`, opts);
   const data = await res.json();
   if (!res.ok) throw new Error(JSON.stringify(data));
   return data;
@@ -1341,6 +1351,63 @@ function isSimilarEvent(name1, date1, name2, date2) {
   return overlap >= 2 && overlap >= Math.min(w1.size, w2.size) * 0.6;
 }
 
+// ── ARCHIVE PAST EVENTS ───────────────────────────────────────────────────────
+async function archivePastEvents() {
+  try {
+    const cutoff = today(); // events with Date < today
+    const filter = encodeURIComponent(`AND({Date}<'${cutoff}',OR({Status}='live',{Status}='pending',{Status}='pending_2nd',{Status}='rejected',{Status}='duplicate'))`);
+    const data = await airtable(`?filterByFormula=${filter}`);
+    const records = data.records || [];
+    if (records.length === 0) { console.log("[ARCHIVE] No past events to archive"); return 0; }
+
+    // Copy to Past Events table in batches of 10
+    for (let i = 0; i < records.length; i += 10) {
+      const batch = records.slice(i, i + 10);
+      try {
+        await airtablePastEvents("", "POST", {
+          records: batch.map(r => ({ fields: {
+            Name:        r.fields.Name        || "",
+            Type:        r.fields.Type        || "",
+            Date:        r.fields.Date        || "",
+            Time:        r.fields.Time        || "",
+            Address:     r.fields.Address     || "",
+            Latitude:    r.fields.Latitude    || 30.2672,
+            Longitude:   r.fields.Longitude   || -97.7431,
+            Description: r.fields.Description || "",
+            Source:      r.fields.Source      || "",
+            Status:      r.fields.Status      || "",
+            SubmittedBy: r.fields.SubmittedBy  || "",
+            ArchivedAt:  new Date().toISOString(),
+          }}})
+        });
+      } catch(e) { console.warn("[ARCHIVE] Copy batch failed (table may not exist yet):", e.message); }
+      // Delete originals regardless of copy success
+      for (const r of batch) {
+        try { await airtable(`/${r.id}`, "DELETE"); } catch(e) {}
+      }
+    }
+    console.log(`[ARCHIVE] Moved ${records.length} past events to Past Events table`);
+    return records.length;
+  } catch(e) {
+    console.error("[ARCHIVE] Error:", e.message);
+    return 0;
+  }
+}
+
+// ── REJECTED URL TRACKING ─────────────────────────────────────────────────────
+async function getRejectedSourceUrls() {
+  try {
+    const filter = encodeURIComponent(`OR({Status}='rejected',{Status}='duplicate')`);
+    const data = await airtable(`?filterByFormula=${filter}&fields[]=Source&fields[]=Name&fields[]=Date`);
+    const urls = new Set((data.records || []).map(r => r.fields.Source).filter(Boolean));
+    const nameDate = new Set((data.records || [])
+      .filter(r => r.fields.Name && r.fields.Date)
+      .map(r => `${normalizeForDedup(r.fields.Name)}__${r.fields.Date}`)
+    );
+    return { urls, nameDate };
+  } catch(e) { console.warn("[DEDUP] Rejected URL fetch failed:", e.message); return { urls: new Set(), nameDate: new Set() }; }
+}
+
 async function getExistingEventsForDedup() {
   try {
     const filter = encodeURIComponent(`NOT(OR({Status}='rejected',{Status}='duplicate'))`);
@@ -1596,16 +1663,23 @@ async function runScraper() {
                       ...txLeg, ...texasTrib, ...aisd, ...planningComm, ...indivisible, ...moveTX, ...workersDef, ...texasOrg, ...tfn, ...tcDems, ...sunrise, ...txCivil, ...acluTX, ...do512, ...luma];
     console.log(`Found ${allFound.length} candidate events`);
 
-    const existingEvents = await getExistingEventsForDedup();
+    const [existingEvents, rejected] = await Promise.all([
+      getExistingEventsForDedup(),
+      getRejectedSourceUrls(),
+    ]);
     const existingKeys = new Set(
       existingEvents.map(e => `${normalizeForDedup(e.name)}__${e.date}`)
     );
     const existingUrls = new Set(existingEvents.map(e => e.source).filter(Boolean));
 
-    // Remove exact name+date or URL matches (already in system)
+    // Remove exact name+date or URL matches (already in system or previously rejected)
     const candidates = allFound.filter(e => {
       if (!e.date || !e.name) return false;
-      if (e.source && existingUrls.has(e.source)) return false; // URL already exists
+      // Skip if URL was previously rejected/duplicated
+      if (e.source && rejected.urls.has(e.source)) { console.log(`  ⛔ Rejected URL skip: "${e.name}"`); return false; }
+      // Skip if name+date was previously rejected
+      if (rejected.nameDate.has(`${normalizeForDedup(e.name)}__${e.date}`)) return false;
+      if (e.source && existingUrls.has(e.source)) return false; // URL already in active system
       return !existingKeys.has(`${normalizeForDedup(e.name)}__${e.date}`);
     });
     console.log(`${candidates.length} after exact-dedup (${allFound.length - candidates.length} filtered)`);
@@ -1646,8 +1720,8 @@ setInterval(() => {
   const dayKey = now.toISOString().slice(0, 10); // "2026-03-12" — unique per day
   if (ctHour === 8 && dayKey !== lastScrapeHour) {
     lastScrapeHour = dayKey;
-    console.log(`⏰ Daily scrape — ${now.toISOString()} (8:00 CT)`);
-    runScraper();
+    console.log(`⏰ Daily 8am CT — archiving past events then scraping`);
+    archivePastEvents().then(() => runScraper());
   }
 }, 60 * 1000);
 
@@ -1817,7 +1891,7 @@ app.post("/admin/auth/register", async (req, res) => {
       const record = created.records[0];
       const token = jwt.sign(
         { id: record.id, email: email.toLowerCase().trim(), name: name.trim(), role: "super_admin" },
-        JWT_SECRET, { expiresIn: "30d" }
+        JWT_SECRET, { expiresIn: "15m" }
       );
       res.json({ success: true, token, email: email.toLowerCase().trim(), name: name.trim(), role: "super_admin" });
     } else {
@@ -1871,7 +1945,7 @@ app.post("/admin/auth/login", async (req, res) => {
       name:  record.fields.DisplayName || record.fields.Email,
       role:  record.fields.Role || "admin",
     };
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "14d" });
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "15m" });
     console.log(`[LOGIN] ${payload.email} (${payload.role})`);
     res.json({ token, email: payload.email, name: payload.name, role: payload.role });
   } catch(e) {
@@ -1993,7 +2067,10 @@ app.delete("/admin/pending-admins/:id", requireAuth, async (req, res) => {
 app.get("/admin/events", requireAuth, async (req, res) => {
   try {
     const status = req.query.status || "pending";
-    const filter = encodeURIComponent(`{Status}='${status}'`);
+    // For live events, only show current/future (matches public view) — archives ran past ones to Past Events table
+    const filter = status === "live"
+      ? encodeURIComponent(`AND({Status}='live',{Date}>='${today()}')`)
+      : encodeURIComponent(`{Status}='${status}'`);
     const data = await airtable(`?filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`);
     res.json({ records: data.records || [] });
   } catch(e) {
