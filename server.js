@@ -350,20 +350,26 @@ async function scrapeVoting() {
   return events;
 }
 
+// Mobilize returns every timeslot of a recurring event, oldest first — use the first one that hasn't started yet
+function firstUpcomingTimeslot(e) {
+  const nowTs = Math.floor(Date.now() / 1000);
+  return (e.timeslots || []).find(t => t.start_date >= nowTs) || null;
+}
+
 async function scrapeMobilize() {
   try {
-    const nowTs = Math.floor(Date.now() / 1000);
+    // timeslot_start=gte_now is Mobilize's upcoming-only filter (timeslot_start_min is ignored by the API)
     const res = await fetch(
-      `https://api.mobilize.us/v1/events?zipcode=78701&radius=50&timeslot_start_min=${nowTs}&per_page=150&visibility=PUBLIC&order_by=timeslot_start`,
+      `https://api.mobilize.us/v1/events?zipcode=78701&radius=50&timeslot_start=gte_now&per_page=150&visibility=PUBLIC`,
       { headers: { "User-Agent": "COMN-Civic-Bot/1.0" }, signal: AbortSignal.timeout(15000) }
     );
-    if (!res.ok) return [];
+    if (!res.ok) { console.warn(`[Mobilize] HTTP ${res.status}`); return []; }
     const data = await res.json();
     // Use API data directly — no per-event deep-linking (was causing 100+ sequential fetches)
     return (data.data || [])
-      .filter(e => e.timeslots?.length > 0)
+      .filter(e => firstUpcomingTimeslot(e))
       .map(e => {
-        const ts = e.timeslots[0];
+        const ts = firstUpcomingTimeslot(e);
         const date = ts?.start_date ? new Date(ts.start_date * 1000).toISOString().split("T")[0] : null;
         const time = ts?.start_date ? new Date(ts.start_date * 1000).toTimeString().slice(0,5) : "10:00";
         const isVirtual = e.is_virtual || e.location?.is_virtual;
@@ -720,6 +726,21 @@ async function scrapeAustinChronicle() {
 }
 
 // ── EVENTBRITE AUSTIN (CIVIC KEYWORD FILTERED) ────────────────────────────────
+// Index just past the "}" that closes the JSON object starting at `start` (skips braces inside strings)
+function jsonObjectEnd(text, start, limit) {
+  let depth = 0, inStr = false;
+  for (let i = start; i < limit; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (c === "\\") i++;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i + 1;
+  }
+  return limit;
+}
+
 async function scrapeEventbriteAustin() {
   try {
     const pages = [
@@ -745,8 +766,8 @@ async function scrapeEventbriteAustin() {
           const jsonStart = html.indexOf("{", sdMarker);
           const scriptEnd = html.indexOf("</script>", sdMarker);
           if (jsonStart !== -1 && scriptEnd !== -1 && jsonStart < scriptEnd) {
-            // Strip trailing semicolon/whitespace before </script>
-            const raw = html.slice(jsonStart, scriptEnd).replace(/;\s*$/, "").trim();
+            // The script assigns more globals after __SERVER_DATA__, so cut at the object's closing brace
+            const raw = html.slice(jsonStart, jsonObjectEnd(html, jsonStart, scriptEnd));
             try {
               const sd = JSON.parse(raw);
               const evList = sd?.search_data?.events?.results || [];
@@ -1152,17 +1173,16 @@ async function scrapeTexasFreedomNetwork() {
 async function scrapeTravisCountyDems() {
   try {
     // travisdemocrats.org domain is down — use Mobilize org API (org ID 903046)
-    const nowTs = Math.floor(Date.now() / 1000);
     const res = await fetch(
-      `https://api.mobilize.us/v1/organizations/903046/events?timeslot_start_min=${nowTs}&per_page=50&visibility=PUBLIC`,
+      `https://api.mobilize.us/v1/organizations/903046/events?timeslot_start=gte_now&per_page=50&visibility=PUBLIC`,
       { headers: { "User-Agent": "COMN-Civic-Bot/1.0" }, signal: AbortSignal.timeout(10000) }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return (data.data || [])
-      .filter(e => e.timeslots?.length > 0)
+      .filter(e => firstUpcomingTimeslot(e))
       .map(e => {
-        const ts = e.timeslots[0];
+        const ts = firstUpcomingTimeslot(e);
         const date = ts?.start_date ? new Date(ts.start_date * 1000).toISOString().split("T")[0] : null;
         const time = ts?.start_date ? new Date(ts.start_date * 1000).toTimeString().slice(0,5) : "18:00";
         const rawDesc = (e.description || "").replace(/<[^>]*>/g,"").replace(/\s+/g," ").trim();
