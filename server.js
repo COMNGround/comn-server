@@ -1361,6 +1361,7 @@ async function archivePastEvents() {
     if (records.length === 0) { console.log("[ARCHIVE] No past events to archive"); return 0; }
 
     // Copy to Past Events table in batches of 10
+    let moved = 0;
     for (let i = 0; i < records.length; i += 10) {
       const batch = records.slice(i, i + 10);
       try {
@@ -1378,16 +1379,19 @@ async function archivePastEvents() {
             Status:      r.fields.Status      || "",
             SubmittedBy: r.fields.SubmittedBy  || "",
             ArchivedAt:  new Date().toISOString(),
-          }}})
+          }}))
         });
-      } catch(e) { console.warn("[ARCHIVE] Copy batch failed (table may not exist yet):", e.message); }
-      // Delete originals regardless of copy success
+      } catch(e) {
+        // Keep the originals if the copy failed, so nothing is lost
+        console.warn("[ARCHIVE] Copy batch failed (table may not exist yet), keeping originals:", e.message);
+        continue;
+      }
       for (const r of batch) {
-        try { await airtable(`/${r.id}`, "DELETE"); } catch(e) {}
+        try { await airtable(`/${r.id}`, "DELETE"); moved++; } catch(e) {}
       }
     }
-    console.log(`[ARCHIVE] Moved ${records.length} past events to Past Events table`);
-    return records.length;
+    console.log(`[ARCHIVE] Moved ${moved} of ${records.length} past events to Past Events table`);
+    return moved;
   } catch(e) {
     console.error("[ARCHIVE] Error:", e.message);
     return 0;
