@@ -3,6 +3,7 @@ const cors    = require("cors");
 const bcrypt  = require("bcryptjs");
 const jwt     = require("jsonwebtoken");
 const crypto  = require("crypto");
+const path    = require("path");
 
 const app  = express();
 const PORT = process.env.PORT || 8080;
@@ -20,6 +21,7 @@ const AT_HEADS = { "Authorization": `Bearer ${AT_TOKEN}`, "Content-Type": "appli
 const RESEND_KEY   = process.env.RESEND_KEY;
 const DIGEST_EMAIL = process.env.DIGEST_EMAIL || "bywilliamcole@gmail.com";
 const ADMIN_URL    = "https://comnground.net/admin.html";
+const REVIEW_URL   = "https://comn-server-production.up.railway.app/review";
 const JWT_SECRET = process.env.JWT_SECRET || "comn-dev-jwt-secret-CHANGE-IN-PROD";
 if (!process.env.JWT_SECRET) console.warn("[WARN] JWT_SECRET env var not set — using insecure default. Set it in Railway before going to production.");
 
@@ -67,7 +69,7 @@ function rateLimit(key, maxPerMinute) {
   rateLimitStore.set(key, rec);
   return rec.count > maxPerMinute;
 }
-setInterval(() => { const now = Date.now(); rateLimitStore.forEach((v,k) => { if (now > v.resetAt) rateLimitStore.delete(k); }); }, 5 * 60 * 1000);
+setInterval(() => { const now = Date.now(); rateLimitStore.forEach((v,k) => { if (now > v.resetAt) rateLimitStore.delete(k); }); }, 5 * 60 * 1000).unref();
 
 // ── LOGIN LOCKOUT ─────────────────────────────────────────────────────────────
 const loginAttempts = new Map(); // email -> { count, lockedUntil }
@@ -125,23 +127,29 @@ function escHtml(str) {
 }
 
 // ── DATE UTILS ───────────────────────────────────────────────────────────────
-function today() { return new Date().toISOString().split("T")[0]; }
-function threeMonthsFromNow() {
-  const d = new Date();
-  d.setMonth(d.getMonth() + 3);
-  return d.toISOString().split("T")[0];
+// All COMN dates are Austin (Central) time, not the server's UTC clock
+const COMN_TZ = "America/Chicago";
+// Date ("YYYY-MM-DD") and time ("HH:MM") of an instant in a given time zone
+function localParts(when, tz = COMN_TZ) {
+  const d = when instanceof Date ? when : new Date(when);
+  if (isNaN(d)) return { date: null, time: null };
+  const p = {};
+  for (const { type, value } of new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz || COMN_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(d)) p[type] = value;
+  return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
 }
-function sixMonthsFromNow() {
-  const d = new Date();
-  d.setMonth(d.getMonth() + 6);
-  return d.toISOString().split("T")[0];
-}
-function inWindow(d) { return d && d >= today() && d <= sixMonthsFromNow(); }
+function today() { return localParts(new Date()).date; }
+function daysFromNow(n) { return localParts(new Date(Date.now() + n * 86400000)).date; }
+// Scraped events further out than this are skipped; they get picked up on a later run
+const SCRAPE_WINDOW_DAYS = 60;
+function inWindow(d) { return d && d >= today() && d <= daysFromNow(SCRAPE_WINDOW_DAYS); }
 function inFuture(d) { return d && d >= today(); }
 
 // ── AIRTABLE HELPERS ──────────────────────────────────────────────────────────
 // NEW optional fields that may not exist in Airtable yet — auto-stripped on error
-const OPTIONAL_FIELDS = ["DuplicateOf", "RejectedBy", "Approvers", "LastScraped"];
+const OPTIONAL_FIELDS = ["DuplicateOf", "RejectedBy", "Approvers", "ReviewNote", "SubmitterEmail"];
 
 async function airtable(path, method = "GET", body = null, _retry = true) {
   const opts = { method, headers: AT_HEADS };
@@ -161,6 +169,29 @@ async function airtable(path, method = "GET", body = null, _retry = true) {
     throw new Error(JSON.stringify(data));
   }
   return data;
+}
+
+// Airtable returns at most 100 records per call; follow the offset to get every match
+async function airtableAll(query = "") {
+  const records = [];
+  let offset = "";
+  do {
+    const sep = query ? "&" : "";
+    const data = await airtable(`?${query}${offset ? `${sep}offset=${encodeURIComponent(offset)}` : ""}`);
+    records.push(...(data.records || []));
+    offset = data.offset || "";
+  } while (offset);
+  return records;
+}
+
+async function sendEmail(to, subject, html) {
+  if (!RESEND_KEY) return;
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: "COMN <onboarding@resend.dev>", to, subject, html }),
+  });
+  if (!res.ok) throw new Error(`Email failed: HTTP ${res.status}`);
 }
 
 async function airtableAdmins(path, method = "GET", body = null) {
@@ -243,8 +274,11 @@ async function fetchEventDetails(url) {
         const ev = items.find(p => p["@type"] === "Event" || p.startDate);
         if (!ev) continue;
         if (ev.startDate) {
-          const d = new Date(ev.startDate);
-          if (!isNaN(d)) { details.date = d.toISOString().split("T")[0]; details.time = d.toTimeString().slice(0,5); }
+          if (/^\d{4}-\d{2}-\d{2}$/.test(ev.startDate)) details.date = ev.startDate; // date only, no time
+          else {
+            const p = localParts(ev.startDate);
+            if (p.date) { details.date = p.date; details.time = p.time; }
+          }
         }
         const loc = ev.location?.address?.streetAddress || ev.location?.name;
         if (loc && loc.length > 5 && !loc.toLowerCase().includes("see source")) details.address = loc.slice(0,200);
@@ -356,6 +390,36 @@ function firstUpcomingTimeslot(e) {
   return (e.timeslots || []).find(t => t.start_date >= nowTs) || null;
 }
 
+// Remote campaign shifts and asks that aren't events someone can show up to
+const MOBILIZE_SKIP_TYPES = new Set([
+  "PHONE_BANK", "TEXT_BANK", "AUTOMATED_PHONE_BANK", "FRIEND_TO_FRIEND_OUTREACH", "POSTCARD_WRITING",
+  "LETTER_WRITING", "FUNDRAISER", "DONATION_CAMPAIGN", "SOCIAL_MEDIA_CAMPAIGN", "PLEDGE",
+  "INTEREST_FORM", "PETITION", "CARPOOL", "LITERATURE_DROP_OFF", "SIGNATURE_GATHERING",
+]);
+
+function mobilizeToEvent(e, fallbackSource) {
+  if (MOBILIZE_SKIP_TYPES.has(e.event_type)) return null;
+  const ts = firstUpcomingTimeslot(e);
+  if (!ts?.start_date) return null;
+  // Timestamps are UTC; show them in the event's own time zone (Austin for nearly all of them)
+  const { date, time } = localParts(new Date(ts.start_date * 1000), e.timezone || COMN_TZ);
+  const isVirtual = !!(e.is_virtual || e.location?.is_virtual);
+  const loc = e.location || {};
+  const street = [loc.venue, (loc.address_lines || []).filter(Boolean).join(" "), loc.locality].filter(Boolean).join(", ");
+  const rawDesc = (e.description || "").replace(/<[^>]*>/g,"").replace(/\s+/g," ").trim();
+  const name = (e.title || "Austin Civic Event").slice(0,100);
+  return {
+    name, type: isVirtual ? "online" : detectEventType(name, rawDesc),
+    date, time,
+    address: isVirtual ? "Online" : (street || "Austin, TX"),
+    lat: isVirtual ? 0 : (parseFloat(loc.location?.latitude ?? loc.lat) || 30.2672),
+    lng: isVirtual ? 0 : (parseFloat(loc.location?.longitude ?? loc.lon) || -97.7431),
+    desc: rawDesc.slice(0,250),
+    source: e.browser_url || fallbackSource || "",
+    org: e.sponsor?.name || "",
+  };
+}
+
 async function scrapeMobilize() {
   try {
     // timeslot_start=gte_now is Mobilize's upcoming-only filter (timeslot_start_min is ignored by the API)
@@ -367,25 +431,8 @@ async function scrapeMobilize() {
     const data = await res.json();
     // Use API data directly — no per-event deep-linking (was causing 100+ sequential fetches)
     return (data.data || [])
-      .filter(e => firstUpcomingTimeslot(e))
-      .map(e => {
-        const ts = firstUpcomingTimeslot(e);
-        const date = ts?.start_date ? new Date(ts.start_date * 1000).toISOString().split("T")[0] : null;
-        const time = ts?.start_date ? new Date(ts.start_date * 1000).toTimeString().slice(0,5) : "10:00";
-        const isVirtual = e.is_virtual || e.location?.is_virtual;
-        const rawDesc = (e.description || "").replace(/<[^>]*>/g,"").replace(/\s+/g," ").trim();
-        const name = (e.title || "Austin Civic Event").slice(0,100);
-        return {
-          name, type: detectEventType(name, rawDesc),
-          date, time,
-          address: isVirtual ? "Online" : (e.location?.venue || e.location?.address_lines?.[0] || "Austin, TX"),
-          lat: isVirtual ? 0 : (parseFloat(e.location?.lat) || 30.2672),
-          lng: isVirtual ? 0 : (parseFloat(e.location?.lon) || -97.7431),
-          desc: rawDesc.slice(0,250),
-          source: e.browser_url || "",
-        };
-      })
-      .filter(e => e.date && inWindow(e.date));
+      .map(e => mobilizeToEvent(e))
+      .filter(e => e && e.date && inWindow(e.date));
   } catch(e) { console.warn("Mobilize scrape failed:", e.message); return []; }
 }
 
@@ -406,9 +453,8 @@ async function scrapeHandsOff() {
         const startMs = item.startDate;
         if (!startMs) continue;
         const d = new Date(typeof startMs === "number" ? startMs : startMs);
-        const date = d.toISOString().split("T")[0];
+        const { date, time } = localParts(d);
         if (!inWindow(date)) continue;
-        const time = d.toTimeString().slice(0, 5);
         const loc = item.location?.addressLine1
           || item.location?.mapWidget?.mapAddress
           || item.location?.name
@@ -776,12 +822,17 @@ async function scrapeEventbriteAustin() {
                 const name = (ev.name?.text || ev.name || ev.title || "").trim();
                 const desc = (ev.summary || ev.description?.text || "").replace(/<[^>]*>/g, "").slice(0, 250);
                 if (!name) continue;
-                const startLocal = ev.start?.local || ev.start_date || "";
-                const date = startLocal ? startLocal.split("T")[0] : null;
-                const time = startLocal?.includes("T") ? startLocal.split("T")[1].slice(0, 5) : "18:00";
+                // Search results carry start_date and start_time separately (already in the event's local time)
+                const startLocal = ev.start?.local || "";
+                const date = startLocal ? startLocal.split("T")[0] : (ev.start_date || null);
+                const time = startLocal.includes("T") ? startLocal.split("T")[1].slice(0, 5)
+                  : (ev.start_time ? String(ev.start_time).slice(0, 5) : "");
                 if (!date || !inWindow(date)) continue;
                 const isVirtual = ev.is_online_event || /\b(virtual|online|zoom|webinar)\b/i.test(name + " " + desc);
                 const venue = ev.primary_venue || ev.venue || {};
+                const city = (venue.address?.city || "").trim();
+                // Eventbrite's Austin pages also list Dallas, Houston, etc.
+                if (!isVirtual && city && !AUSTIN_AREA_CITIES.test(city)) continue;
                 const addr = isVirtual ? "Online"
                   : (venue.address?.localized_address_display || venue.name || "Austin, TX");
                 const src = ev.url || pageUrl;
@@ -1180,24 +1231,8 @@ async function scrapeTravisCountyDems() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return (data.data || [])
-      .filter(e => firstUpcomingTimeslot(e))
-      .map(e => {
-        const ts = firstUpcomingTimeslot(e);
-        const date = ts?.start_date ? new Date(ts.start_date * 1000).toISOString().split("T")[0] : null;
-        const time = ts?.start_date ? new Date(ts.start_date * 1000).toTimeString().slice(0,5) : "18:00";
-        const rawDesc = (e.description || "").replace(/<[^>]*>/g,"").replace(/\s+/g," ").trim();
-        const name = (e.title || "Travis County Democrats Event").slice(0,100);
-        return {
-          name, type: detectEventType(name, rawDesc),
-          date, time,
-          address: e.location?.venue || e.location?.address_lines?.[0] || "Austin, TX",
-          lat: parseFloat(e.location?.lat) || 30.2672,
-          lng: parseFloat(e.location?.lon) || -97.7431,
-          desc: rawDesc.slice(0,250),
-          source: e.browser_url || "https://www.mobilize.us/traviscountydems/",
-        };
-      })
-      .filter(e => e.date && inWindow(e.date));
+      .map(e => mobilizeToEvent(e, "https://www.mobilize.us/traviscountydems/"))
+      .filter(e => e && e.date && inWindow(e.date));
   } catch(e) {
     console.warn("[Travis County Dems]", e.message);
     return [];
@@ -1351,24 +1386,82 @@ async function scrapeLumaAustin() {
   } catch(e) { console.warn("[Luma Austin]", e.message); return []; }
 }
 
-// ── DEDUPLICATION ─────────────────────────────────────────────────────────────
-function normalizeForDedup(name) {
-  return (name || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+// ── RELEVANCE & LOCATION FILTERS ──────────────────────────────────────────────
+// Austin metro, for checking venue cities from general event sites
+const AUSTIN_AREA_CITIES = /^(austin|round rock|pflugerville|cedar park|leander|georgetown|manor|del valle|buda|kyle|san marcos|lakeway|bee cave|west lake hills|westlake|sunset valley|rollingwood|hutto|elgin|dripping springs|bastrop|lago vista|jonestown|taylor|liberty hill|travis county|williamson county|hays county)$/i;
+const OTHER_CITIES = /\b(dallas|houston|san antonio|fort worth|el paso|plano|arlington|waco|corpus christi|lubbock|denton)\b/i;
+const AUSTIN_LAT = 30.2672, AUSTIN_LNG = -97.7431;
+const MAX_KM_FROM_AUSTIN = 80;
+
+function kmFromAustin(lat, lng) {
+  const rad = x => x * Math.PI / 180;
+  const dLat = rad(lat - AUSTIN_LAT), dLng = rad(lng - AUSTIN_LNG);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(lat)) * Math.cos(rad(AUSTIN_LAT)) * Math.sin(dLng / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(h));
 }
 
+// Clearly civic: government, elections, advocacy, organizing
+const STRONG_CIVIC = /\b(vote|voter|voters|voting|election|elections|ballot|polls|runoff|primary|candidate|candidates|town hall|townhall|city council|council member|county|commission|commissioners|school board|trustee|legislature|legislative|lawmakers|capitol|public hearing|public comment|public meeting|policy|policies|advocacy|advocate|civic|civics|democracy|government|rights|justice|equity|protest|rally|march|vigil|organizing|organizer|mutual aid|coalition|activism|activist|immigration|immigrant|housing|tenant|tenants|transit|zoning|climate|budget|census|nonpartisan|league of women voters|indivisible|naacp|aclu|know your rights|redistricting|precinct|block walk|canvass|volunteer|volunteers|community forum|neighborhood association|food drive|meals for people|in need|municipal|public power|utility|utilities|democrat|democrats|democratic|republican|republicans|gop|libertarian|green party|political)\b/i;
+// Entertainment, fitness, nightlife, religion and business events that keep slipping in
+const JUNK = /\b(beer|brewery|brewing|wine|cocktail|happy hour|bar crawl|5k|10k|fun run|marathon|yoga|meditation|sound bath|worship|revival|jesus|church service|rave|dj|concert|comedy|murder mystery|car show|lowrider|festival|fest|expo|trade show|conference|networking|business summit|tech summit|startup|founders|investor|real estate|market|bazaar|craft fair|art show|gala|prom|party|brunch|dinner with|foodies|matcha|speed dating|singles|book swap|tickets?)\b/i;
+// General-purpose event sites that need a civic match; dedicated civic sources skip this check
+const AGGREGATOR_SOURCES = /eventbrite\.|do512\.com|lu\.ma|luma\.com|austinchronicle\.com/i;
+
+// Returns a reason string if the event should be dropped, else null
+function dropReason(e) {
+  if (!e.name || !e.date) return "missing name or date";
+  if (!inWindow(e.date)) return "past or too far out";
+  const isOnline = e.type === "online" || /^online$/i.test(e.address || "");
+  if (!isOnline && e.lat && e.lng && (e.lat !== AUSTIN_LAT || e.lng !== AUSTIN_LNG) && kmFromAustin(e.lat, e.lng) > MAX_KM_FROM_AUSTIN)
+    return "outside Austin area";
+  if (OTHER_CITIES.test(e.name) && !/\baustin\b/i.test(e.name)) return "outside Austin area";
+  if (AGGREGATOR_SOURCES.test(e.source || "")) {
+    const strongInName = STRONG_CIVIC.test(e.name);
+    const strongInDesc = STRONG_CIVIC.test(e.desc || "");
+    if (!strongInName && !strongInDesc) return "not civic";
+    // A junk word in the title wins unless the title itself is civic ("Bar Crawl and Voter Mobilization")
+    if (JUNK.test(e.name) && !strongInName) return "not civic";
+  }
+  return null;
+}
+
+// Things worth a second look, shown to the reviewer (never public)
+function reviewNote(e) {
+  const notes = [];
+  if (!e.time) notes.push("No start time listed");
+  if (!e.address || /^(austin, tx|see source)/i.test(e.address) || /see source/i.test(e.address)) notes.push("No exact location");
+  if (e.dupHint) notes.push(`Possible duplicate of "${e.dupHint}"`);
+  return notes.join(" · ").slice(0, 250);
+}
+
+// ── DEDUPLICATION ─────────────────────────────────────────────────────────────
+function normalizeForDedup(name) {
+  return (name || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+const DEDUP_STOPWORDS = new Set(["the","and","for","with","from","at","in","on","of","to","a","an","austin","tx","texas","event","meeting","2026","2027"]);
+function dedupWords(name) {
+  return new Set(normalizeForDedup(name).split(" ").filter(w => w.length > 1 && !DEDUP_STOPWORDS.has(w)));
+}
+
+// Same day and nearly the same title. Stricter than before: "Party at the Polls @ UT Austin" and
+// "Party at the Polls @ ACC Rio Grande" are different events.
 function isSimilarEvent(name1, date1, name2, date2) {
   if (!date1 || !date2 || date1 !== date2) return false;
-  const n1 = normalizeForDedup(name1);
-  const n2 = normalizeForDedup(name2);
+  const n1 = normalizeForDedup(name1), n2 = normalizeForDedup(name2);
   if (!n1 || !n2) return false;
   if (n1 === n2) return true;
-  if (n1.includes(n2) || n2.includes(n1)) return true;
-  // Word-overlap: 2+ significant words in common = likely same event
-  const w1 = new Set(n1.split(" ").filter(w => w.length > 3));
-  const w2 = new Set(n2.split(" ").filter(w => w.length > 3));
+  const w1 = dedupWords(name1), w2 = dedupWords(name2);
+  if (w1.size === 0 || w2.size === 0) return false;
   let overlap = 0;
   for (const w of w1) if (w2.has(w)) overlap++;
-  return overlap >= 2 && overlap >= Math.min(w1.size, w2.size) * 0.6;
+  const jaccard = overlap / (w1.size + w2.size - overlap);
+  return jaccard >= 0.75;
+}
+
+// Recurring series ("Party at the Polls @ UT Austin" on 5 dates) — key without the date
+function seriesKey(e) {
+  return `${normalizeForDedup(e.name)}__${(e.source || "").replace(/^https?:\/\/(www\.)?/, "").split("/")[0]}`;
 }
 
 // ── ARCHIVE PAST EVENTS ───────────────────────────────────────────────────────
@@ -1418,86 +1511,116 @@ async function archivePastEvents() {
   }
 }
 
-// ── REJECTED URL TRACKING ─────────────────────────────────────────────────────
-async function getRejectedSourceUrls() {
-  try {
-    const filter = encodeURIComponent(`OR({Status}='rejected',{Status}='duplicate')`);
-    const data = await airtable(`?filterByFormula=${filter}&fields[]=Source&fields[]=Name&fields[]=Date`);
-    const urls = new Set((data.records || []).map(r => r.fields.Source).filter(Boolean));
-    const nameDate = new Set((data.records || [])
-      .filter(r => r.fields.Name && r.fields.Date)
-      .map(r => `${normalizeForDedup(r.fields.Name)}__${r.fields.Date}`)
-    );
-    return { urls, nameDate };
-  } catch(e) { console.warn("[DEDUP] Rejected URL fetch failed:", e.message); return { urls: new Set(), nameDate: new Set() }; }
+// ── DEDUP DATA FROM AIRTABLE ──────────────────────────────────────────────────
+// Every event we already know about, any status, paginated (the table is past 100 rows)
+async function getKnownEvents() {
+  const recs = await airtableAll("fields[]=Name&fields[]=Date&fields[]=Source&fields[]=Status");
+  return recs.map(r => ({
+    id:     r.id,
+    name:   r.fields.Name   || "",
+    date:   r.fields.Date   || "",
+    source: r.fields.Source || "",
+    status: r.fields.Status || "",
+  }));
 }
 
-async function getExistingEventsForDedup() {
-  try {
-    const filter = encodeURIComponent(`NOT(OR({Status}='rejected',{Status}='duplicate'))`);
-    const data = await airtable(`?filterByFormula=${filter}&fields[]=Name&fields[]=Date&fields[]=Source`);
-    return (data.records || []).map(r => ({
-      id:     r.id,
-      name:   r.fields.Name   || "",
-      date:   r.fields.Date   || "",
-      source: r.fields.Source || "",
-    }));
-  } catch(e) { console.warn("Dedup fetch failed:", e.message); return []; }
+// A URL is only an event's identity if it points at that one event. Listing pages
+// (".../events", the council index) are shared by many events on different dates.
+function listingUrlSet(events) {
+  const datesByUrl = new Map();
+  for (const e of events) {
+    if (!e.source) continue;
+    if (!datesByUrl.has(e.source)) datesByUrl.set(e.source, new Set());
+    datesByUrl.get(e.source).add(e.date);
+  }
+  const listing = new Set(SOURCES.map(s => s.url));
+  for (const [url, dates] of datesByUrl) if (dates.size > 1) listing.add(url);
+  return listing;
+}
+function isListingUrl(url, listing) {
+  if (!url) return true;
+  const u = url.replace(/[?#].*$/, "");
+  return listing.has(url) || /\/events\/?$/.test(u) || /^https?:\/\/[^/]+\/?$/.test(u) || /_index\.htm$/.test(u);
+}
+
+// Decide what happens to each scraped event: skipped (already known, junk, past) or saved
+// as "pending" (needs review) or "duplicate" (near-copy of something already queued/live).
+function classifyCandidates(allFound, known) {
+  const skipped = {}; // reason → count
+  const skip = r => { skipped[r] = (skipped[r] || 0) + 1; };
+  const listing = listingUrlSet([...allFound, ...known]);
+  const knownUrls = new Set(known.filter(k => !isListingUrl(k.source, listing)).map(k => k.source));
+  const knownKeys = new Set(known.map(k => `${normalizeForDedup(k.name)}__${k.date}`));
+  const active = known.filter(k => ["pending", "pending_2nd", "live"].includes(k.status));
+  const activeSeries = new Set(active.filter(k => k.date >= today() && !isListingUrl(k.source, listing)).map(seriesKey));
+
+  // Earliest first so a recurring series keeps its next occurrence
+  const sorted = [...allFound].sort((x, y) => (x.date + (x.time || "")).localeCompare(y.date + (y.time || "")));
+  const out = [];
+  const runUrls = new Set(), runKeys = new Set(), runSeries = new Set();
+  for (const e of sorted) {
+    const why = dropReason(e);
+    if (why) { skip(why); continue; }
+    const key = `${normalizeForDedup(e.name)}__${e.date}`;
+    const ownUrl = !isListingUrl(e.source, listing);
+    // Already in Airtable in any status (including rejected), or found twice this run
+    if ((ownUrl && (knownUrls.has(e.source) || runUrls.has(e.source))) || knownKeys.has(key) || runKeys.has(key)) {
+      skip("already in Airtable or found twice"); continue;
+    }
+    if (ownUrl) {
+      const sk = seriesKey(e);
+      if (activeSeries.has(sk) || runSeries.has(sk)) { skip("later date of a recurring event"); continue; }
+      runSeries.add(sk);
+      runUrls.add(e.source);
+    }
+    runKeys.add(key);
+    // Near-copy of a queued/live event, or of one saved earlier in this run
+    const match = active.find(k => isSimilarEvent(k.name, k.date, e.name, e.date))
+               || out.find(o => o.status === "pending" && isSimilarEvent(o.name, o.date, e.name, e.date));
+    out.push({ ...e, status: match ? "duplicate" : "pending", dupOf: match?.id || "", dupHint: match ? match.name : "" });
+  }
+  return { toSave: out, skipped };
 }
 
 // ── SAVE EVENTS ───────────────────────────────────────────────────────────────
 // ⚠️  HUMAN APPROVAL REQUIRED — SAFETY RULE ⚠️
 // Events are saved as "pending" or "duplicate". NEVER "live" automatically.
 // The ONLY path to "live" is a human admin approving via the admin panel.
-async function saveEvents(events, existingEventsForDedup) {
+function scrapedFields(e) {
+  return {
+    Name:        e.name,
+    Type:        e.type,
+    Date:        e.date,
+    Time:        e.time     || "",
+    Address:     e.address  || "",
+    Latitude:    e.lat      || 30.2672,
+    Longitude:   e.lng      || -97.7431,
+    Description: e.desc     || "",
+    Source:      e.source   || "",
+    Status:      e.status === "duplicate" ? "duplicate" : "pending", // NEVER "live"
+    SubmittedBy: "COMN Auto-Scraper",
+    DuplicateOf: e.dupOf || "",
+    ReviewNote:  reviewNote(e),
+  };
+}
+
+async function saveEvents(events) {
   const saved = [];
-  // Build a set of existing source URLs for fast URL-based dedup
-  const existingUrls = new Set(
-    (existingEventsForDedup || []).map(e => e.source).filter(Boolean)
-  );
   for (let i = 0; i < events.length; i += 10) {
     const batch = events.slice(i, i + 10);
     try {
-      const data = await airtable("", "POST", {
-        records: batch.map(e => {
-          let status = "pending"; // Default — NEVER change to "live"
-          let dupOf  = "";
-          // URL-based dedup (most precise — same source URL = same event)
-          if (e.source && existingUrls.has(e.source)) {
-            status = "duplicate";
-            const urlMatch = (existingEventsForDedup || []).find(ex => ex.source === e.source);
-            dupOf = urlMatch?.id || "";
-            console.log(`  ⚠️ URL duplicate: "${e.name}" — source URL already in system`);
-          } else if (existingEventsForDedup) {
-            // Fuzzy name+date dedup as fallback
-            const match = existingEventsForDedup.find(ex =>
-              isSimilarEvent(ex.name, ex.date, e.name, e.date)
-            );
-            if (match) {
-              status = "duplicate";
-              dupOf  = match.id;
-              console.log(`  ⚠️ Near-duplicate: "${e.name}" (${e.date}) ~ "${match.name}"`);
-            }
-          }
-          return { fields: {
-            Name:        e.name,
-            Type:        e.type,
-            Date:        e.date,
-            Time:        e.time     || "",
-            Address:     e.address  || "",
-            Latitude:    e.lat      || 30.2672,
-            Longitude:   e.lng      || -97.7431,
-            Description: e.desc     || "",
-            Source:      e.source   || "",
-            Status:      status,     // "pending" or "duplicate" — NEVER "live"
-            SubmittedBy: "COMN Auto-Scraper",
-            DuplicateOf: dupOf,
-            LastScraped: new Date().toISOString(),
-          }};
-        })
-      });
+      const data = await airtable("", "POST", { records: batch.map(e => ({ fields: scrapedFields(e) })) });
       saved.push(...(data.records || []));
-    } catch(e) { console.error("Save batch error:", e.message); }
+    } catch(e) {
+      // One bad record fails the whole batch — retry one at a time so the rest still land
+      console.error("Save batch error, retrying one by one:", e.message.slice(0, 200));
+      for (const ev of batch) {
+        try {
+          const data = await airtable("", "POST", { records: [{ fields: scrapedFields(ev) }] });
+          saved.push(...(data.records || []));
+        } catch(e2) { console.error(`  Could not save "${ev.name}":`, e2.message.slice(0, 200)); }
+      }
+    }
   }
   return saved;
 }
@@ -1505,7 +1628,7 @@ async function saveEvents(events, existingEventsForDedup) {
 // ── EMAIL DIGEST ──────────────────────────────────────────────────────────────
 async function sendDigest(stats) {
   if (!RESEND_KEY) { console.log("No RESEND_KEY — skipping email"); return; }
-  const { newPending, totalPending, found, dupes, perSource, errors, typeCounts, reclassified } = stats;
+  const { newPending, newDupes, totalPending, found, skipped, perSource, errors, typeCounts } = stats;
   const dateStr = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
   const subject = newPending > 0
     ? `COMN Daily Digest — ${newPending} new event${newPending !== 1 ? "s" : ""} pending review`
@@ -1523,13 +1646,14 @@ async function sendDigest(stats) {
     if (totalTyped > 4 && c / totalTyped > 0.6)
       biasWarnings.push(`  ⚠️  "${t}" is ${Math.round(c / totalTyped * 100)}% of new events — review scraper sources`);
   }
-  if (reclassified > 0)
-    biasWarnings.push(`  ⚠️  ${reclassified} event${reclassified > 1 ? "s" : ""} reclassified by content analysis`);
 
-  // Per-source breakdown
-  const sourceLines = Object.entries(perSource || {}).map(([src, count]) =>
-    `  ${src}: ${count} event${count !== 1 ? "s" : ""}${count === 0 ? " ⚠️  (0 found — possible scraping failure)" : ""}`
+  // Per-source breakdown — list the sources that found something, then the silent ones on one line
+  const entries = Object.entries(perSource || {});
+  const sourceLines = entries.filter(([, c]) => c > 0).map(([src, count]) =>
+    `  ${src}: ${count} event${count !== 1 ? "s" : ""}`
   ).join("\n");
+  const silent = entries.filter(([, c]) => c === 0).map(([src]) => src);
+  const skippedLines = Object.entries(skipped || {}).map(([why, n]) => `    ${n} — ${why}`).join("\n");
   const errorLines = (errors || []).map(e => `  ❌ ${e}`).join("\n");
 
   const lines = [
@@ -1538,12 +1662,15 @@ async function sendDigest(stats) {
     "📊 Scrape Summary",
     `  Sources checked: ${Object.keys(perSource || {}).length}`,
     `  Total candidate events: ${found}`,
-    `  Duplicates filtered: ${dupes}`,
+    `  Skipped automatically: ${Object.values(skipped || {}).reduce((a, b) => a + b, 0)}`,
+    skippedLines || null,
+    `  Near-duplicates set aside: ${newDupes || 0}`,
     `  New events pending review: ${newPending}`,
     errors?.length > 0 ? `  Scraping errors: ${errors.length}` : null,
     "",
     "📦 Events by Source",
     sourceLines || "  (none)",
+    silent.length ? `  ⚠️  Found nothing (${silent.length}): ${silent.join(", ")}` : null,
   ];
   if (errors?.length > 0) lines.push("", "🚨 Scraping Errors", errorLines);
   lines.push(
@@ -1554,7 +1681,8 @@ async function sendDigest(stats) {
     "",
     `📋 Total events currently pending admin review: ${totalPending}`,
     "",
-    `🔗 Review now: ${ADMIN_URL}`,
+    `⚡ Quick review: ${REVIEW_URL}`,
+    `🔗 Admin panel: ${ADMIN_URL}`,
     "",
     "---",
     "COMN is committed to non-partisan, fact-based civic information.",
@@ -1629,7 +1757,22 @@ async function updateSourcesAirtable() {
 }
 
 // ── MAIN SCRAPE ───────────────────────────────────────────────────────────────
-async function runScraper() {
+// Upcoming events in the given statuses (past ones never need review)
+async function countUpcoming(statuses) {
+  const ors = statuses.map(st => `{Status}='${st}'`).join(",");
+  const filter = encodeURIComponent(`AND(OR(${ors}),{Date}>='${today()}')`);
+  return (await airtableAll(`filterByFormula=${filter}&fields[]=Status`)).length;
+}
+
+// "Scrape now" and the 8am run must never overlap, or both save the same events
+let scrapeInProgress = null;
+function runScraper() {
+  if (scrapeInProgress) { console.log("Scrape already running — skipping"); return scrapeInProgress; }
+  scrapeInProgress = runScraperOnce().finally(() => { scrapeInProgress = null; });
+  return scrapeInProgress;
+}
+
+async function runScraperOnce() {
   console.log(`[${new Date().toISOString()}] Starting scrape...`);
   const scrapeErrors = [];
   const perSource = {};
@@ -1687,49 +1830,23 @@ async function runScraper() {
                       ...txLeg, ...texasTrib, ...aisd, ...planningComm, ...indivisible, ...moveTX, ...workersDef, ...texasOrg, ...tfn, ...tcDems, ...sunrise, ...txCivil, ...acluTX, ...do512, ...luma];
     console.log(`Found ${allFound.length} candidate events`);
 
-    const [existingEvents, rejected] = await Promise.all([
-      getExistingEventsForDedup(),
-      getRejectedSourceUrls(),
-    ]);
-    const existingKeys = new Set(
-      existingEvents.map(e => `${normalizeForDedup(e.name)}__${e.date}`)
-    );
-    const existingUrls = new Set(existingEvents.map(e => e.source).filter(Boolean));
+    const known = await getKnownEvents();
+    const { toSave, skipped } = classifyCandidates(allFound, known);
+    for (const [why, n] of Object.entries(skipped)) console.log(`  skipped ${n}: ${why}`);
 
-    // Remove exact name+date or URL matches (already in system or previously rejected)
-    const candidates = allFound.filter(e => {
-      if (!e.date || !e.name) return false;
-      // Skip if URL was previously rejected/duplicated
-      if (e.source && rejected.urls.has(e.source)) { console.log(`  ⛔ Rejected URL skip: "${e.name}"`); return false; }
-      // Skip if name+date was previously rejected
-      if (rejected.nameDate.has(`${normalizeForDedup(e.name)}__${e.date}`)) return false;
-      if (e.source && existingUrls.has(e.source)) return false; // URL already in active system
-      return !existingKeys.has(`${normalizeForDedup(e.name)}__${e.date}`);
-    });
-    console.log(`${candidates.length} after exact-dedup (${allFound.length - candidates.length} filtered)`);
-
-    // Save — near-dupes automatically get status="duplicate"
-    const saved = candidates.length > 0 ? await saveEvents(candidates, existingEvents) : [];
+    // Save — near-dupes get status="duplicate" so they stay out of the review queue
+    const saved = toSave.length > 0 ? await saveEvents(toSave) : [];
     const newPending = saved.filter(r => r.fields?.Status === "pending").length;
     const newDupes   = saved.filter(r => r.fields?.Status === "duplicate").length;
-    const dupes      = (allFound.length - candidates.length) + newDupes;
-    console.log(`Saved: ${newPending} pending, ${newDupes} near-dupes flagged`);
+    console.log(`Saved: ${newPending} pending, ${newDupes} near-dupes flagged, ${toSave.length - saved.length} failed`);
 
     let totalPending = 0;
-    try {
-      const f1 = encodeURIComponent(`{Status}='pending'`);
-      const f2 = encodeURIComponent(`{Status}='pending_2nd'`);
-      const [d1, d2] = await Promise.all([
-        airtable(`?filterByFormula=${f1}&fields[]=Name`),
-        airtable(`?filterByFormula=${f2}&fields[]=Name`),
-      ]);
-      totalPending = (d1.records||[]).length + (d2.records||[]).length;
-    } catch(e) {}
+    try { totalPending = await countUpcoming(["pending", "pending_2nd"]); } catch(e) {}
 
-    await sendDigest({ newPending, totalPending, found: allFound.length, dupes, perSource, errors: scrapeErrors, typeCounts, reclassified: 0 });
+    await sendDigest({ newPending, newDupes, totalPending, found: allFound.length, skipped, perSource, errors: scrapeErrors, typeCounts });
     await updateSourcesAirtable();
     console.log(`[${new Date().toISOString()}] Scrape complete.`);
-    return { found: allFound.length, newPending, newDupes, totalPending };
+    return { found: allFound.length, newPending, newDupes, totalPending, skipped };
   } catch(e) {
     console.error("Scraper error:", e.message);
     return { error: e.message };
@@ -1738,7 +1855,7 @@ async function runScraper() {
 
 // ── CRON: EVERY HOUR ─────────────────────────────────────────────────────────
 let lastScrapeHour = "";
-setInterval(() => {
+if (require.main === module) setInterval(() => {
   const now = new Date();
   const ctHour = parseInt(new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hour: "numeric", hour12: false }).format(now));
   const dayKey = now.toISOString().slice(0, 10); // "2026-03-12" — unique per day
@@ -1761,8 +1878,8 @@ app.get("/", (req, res) =>
 app.get("/events", async (req, res) => {
   try {
     const filter = encodeURIComponent(`AND({Status}='live',{Date}>='${today()}')`);
-    const data = await airtable(`?filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`);
-    const events = (data.records || []).map(r => ({
+    const records = await airtableAll(`filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`);
+    const events = records.map(r => ({
       id:      r.id,
       name:    r.fields.Name        || "",
       type:    (r.fields.Type       || "nonprofit").toLowerCase(),
@@ -1783,13 +1900,7 @@ app.get("/events", async (req, res) => {
 
 app.get("/pending-count", async (req, res) => {
   try {
-    const f1 = encodeURIComponent(`{Status}='pending'`);
-    const f2 = encodeURIComponent(`{Status}='pending_2nd'`);
-    const [d1, d2] = await Promise.all([
-      airtable(`?filterByFormula=${f1}&fields[]=Name`),
-      airtable(`?filterByFormula=${f2}&fields[]=Name`),
-    ]);
-    res.json({ count: (d1.records||[]).length + (d2.records||[]).length });
+    res.json({ count: await countUpcoming(["pending", "pending_2nd"]) });
   } catch(e) { res.status(500).json({ count: 0 }); }
 });
 
@@ -1823,7 +1934,7 @@ app.post("/submit", async (req, res) => {
         Source:      f.source || "",
         Status: "pending",
         SubmittedBy: f.submittedBy || "Public",
-        SubmitterEmail: submitterEmail,
+        ...(submitterEmail ? { SubmitterEmail: submitterEmail } : {}),
       }}]
     });
     // Notify admin of public submission
@@ -2090,13 +2201,14 @@ app.delete("/admin/pending-admins/:id", requireAuth, async (req, res) => {
 
 app.get("/admin/events", requireAuth, async (req, res) => {
   try {
-    const status = req.query.status || "pending";
-    // For live events, only show current/future (matches public view) — archives ran past ones to Past Events table
-    const filter = status === "live"
-      ? encodeURIComponent(`AND({Status}='live',{Date}>='${today()}')`)
+    const status = String(req.query.status || "pending").replace(/[^a-z_0-9]/gi, "");
+    // Live and pending queues only show today and later — a past event can't be published or attended
+    const upcomingOnly = ["live", "pending", "pending_2nd"].includes(status);
+    const filter = upcomingOnly
+      ? encodeURIComponent(`AND({Status}='${status}',{Date}>='${today()}')`)
       : encodeURIComponent(`{Status}='${status}'`);
-    const data = await airtable(`?filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`);
-    res.json({ records: data.records || [] });
+    const records = await airtableAll(`filterByFormula=${filter}&sort[0][field]=Date&sort[0][direction]=asc`);
+    res.json({ records });
   } catch(e) {
     console.error("GET /admin/events:", e.message);
     res.status(500).json({ error: "Failed to fetch events" });
@@ -2104,118 +2216,139 @@ app.get("/admin/events", requireAuth, async (req, res) => {
 });
 
 // ⚠️  THE ONLY WAY AN EVENT BECOMES "live" — requires human authentication.
+// Returns [httpStatus, responseBody]; shared by the single and bulk review endpoints.
+async function reviewEvent(admin, eventId, action, reason) {
+  const reply = (code, payload) => [code, payload];
+  const adminEmail = admin.email;
+  const adminRole  = admin.role;
+
+  if (!["approve", "reject"].includes(action))
+    return reply(400, { error: "action must be 'approve' or 'reject'" });
+
+  const current = await airtable(`/${eventId}`);
+  const currentStatus    = current.fields?.Status    || "";
+  const currentApprovers = current.fields?.Approvers || "";
+
+  if (action === "reject") {
+    reason = String(reason || "").trim().slice(0, 300);
+    await airtable(`/${eventId}`, "PATCH", {
+      fields: { Status: "rejected", RejectedBy: adminEmail, Approvers: "" }
+    });
+    console.log(`[REJECTED] ${eventId} by ${adminEmail}${reason ? ` — "${reason}"` : ""}`);
+    // Email submitter if they left an email
+    const submitterEmail = current.fields?.SubmitterEmail || "";
+    if (submitterEmail && RESEND_KEY) {
+      const evName = current.fields?.Name || "Your event";
+      await sendEmail(submitterEmail, `Update on your COMN submission: "${evName}"`,
+        `<p>Hi there,</p>
+         <p>Thank you for submitting to COMN — Common Ground.</p>
+         <p>Unfortunately, our team was unable to approve <strong>${escHtml(evName)}</strong> at this time.</p>
+         ${reason ? `<p><strong>Reason:</strong> ${escHtml(reason)}</p>` : ""}
+         <p>You're welcome to make changes and resubmit at <a href="https://comnground.net">comnground.net</a>.</p>
+         <p style="color:#888;font-size:12px">— The COMN Team</p>`
+      ).catch(() => {});
+    }
+    return reply(200, { success: true, newStatus: "rejected" });
+  }
+
+  // APPROVE — Policy 12: Conflict-of-interest check
+  // Admins may not approve events they submitted or events from their own organization
+  const submitterEmail = (current.fields?.SubmitterEmail || "").toLowerCase();
+  if (submitterEmail && submitterEmail === adminEmail.toLowerCase()) {
+    return reply(403, {
+      error: "Policy 12: You cannot approve an event you submitted yourself. Another admin must review this event.",
+    });
+  }
+  const GENERIC_DOMAINS = ["gmail.com","yahoo.com","hotmail.com","outlook.com","icloud.com","protonmail.com","me.com","aol.com","live.com","msn.com"];
+  const adminDomain     = (adminEmail.split("@")[1] || "").toLowerCase();
+  const submitterDomain = (submitterEmail.split("@")[1] || "").toLowerCase();
+  if (submitterEmail && adminDomain && submitterDomain && adminDomain === submitterDomain && !GENERIC_DOMAINS.includes(adminDomain)) {
+    return reply(403, {
+      error: `Policy 12: You share an organization domain (@${adminDomain}) with the event submitter. Another admin must approve this event to avoid a conflict of interest.`,
+    });
+  }
+
+  // APPROVE — strip admin-internal notes before going live
+  const rawDesc     = current.fields?.Description || "";
+  const cleanDesc   = hasAdminNote(rawDesc) ? stripAdminNotes(rawDesc) : rawDesc;
+  const descChanged = cleanDesc !== rawDesc;
+
+  // Warn if event date is >90 days out
+  const eventDate = current.fields?.Date || "";
+  const ninetyDaysOut = new Date(); ninetyDaysOut.setDate(ninetyDaysOut.getDate() + 90);
+  const farFuture = eventDate && new Date(eventDate) > ninetyDaysOut;
+
+  if (adminRole === "super_admin") {
+    // Super admin: instant live — they count as the full approval chain
+    const patchFields = { Status: "live", Approvers: `${adminEmail} (super admin)`, RejectedBy: "" };
+    if (descChanged) patchFields.Description = cleanDesc;
+    await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
+    console.log(`[SUPER ADMIN → LIVE] ${eventId} by ${adminEmail}${descChanged ? " (admin notes stripped)" : ""}`);
+    return reply(200, {
+      success: true, newStatus: "live",
+      message: "Event is now live!" + (descChanged ? " (Admin notes were stripped from description.)" : ""),
+      farFuture,
+    });
+  }
+
+  // Regular admin — two-step
+  if (currentStatus === "pending") {
+    const patchFields = { Status: "pending_2nd", Approvers: adminEmail };
+    if (descChanged) patchFields.Description = cleanDesc;
+    await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
+    console.log(`[1ST APPROVAL] ${eventId} by ${adminEmail} — awaiting 2nd`);
+    return reply(200, {
+      success: true, newStatus: "pending_2nd",
+      message: "First approval done! A second admin must now approve before it goes live.",
+      farFuture,
+    });
+  }
+
+  if (currentStatus === "pending_2nd") {
+    if (currentApprovers.includes(adminEmail))
+      return reply(400, {
+        error: "You already gave the first approval. A different admin must give the second.",
+      });
+    const allApprovers = [currentApprovers, adminEmail].filter(Boolean).join(", ");
+    const patchFields = { Status: "live", Approvers: allApprovers };
+    if (descChanged) patchFields.Description = cleanDesc;
+    await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
+    console.log(`[2ND APPROVAL → LIVE] ${eventId}. Approvers: ${allApprovers}${descChanged ? " (admin notes stripped)" : ""}`);
+    return reply(200, {
+      success: true, newStatus: "live",
+      message: "Event approved and now live!" + (descChanged ? " (Admin notes were stripped from description.)" : ""),
+      farFuture,
+    });
+  }
+
+  return reply(400, { error: `Cannot approve event with status: ${currentStatus}` });
+
+}
+
 app.patch("/admin/events/:id", requireAuth, async (req, res) => {
   try {
-    const { action } = req.body;
-    const adminEmail = req.admin.email;
-    const adminRole  = req.admin.role;
-    const eventId    = req.params.id;
-
-    if (!["approve", "reject"].includes(action))
-      return res.status(400).json({ error: "action must be 'approve' or 'reject'" });
-
-    const current = await airtable(`/${eventId}`);
-    const currentStatus    = current.fields?.Status    || "";
-    const currentApprovers = current.fields?.Approvers || "";
-
-    if (action === "reject") {
-      const reason = (req.body.reason || "").trim().slice(0, 300);
-      await airtable(`/${eventId}`, "PATCH", {
-        fields: { Status: "rejected", RejectedBy: adminEmail, Approvers: "" }
-      });
-      console.log(`[REJECTED] ${eventId} by ${adminEmail}${reason ? ` — "${reason}"` : ""}`);
-      // Email submitter if they left an email
-      const submitterEmail = current.fields?.SubmitterEmail || "";
-      if (submitterEmail && RESEND_KEY) {
-        const evName = current.fields?.Name || "Your event";
-        await sendEmail(submitterEmail, `Update on your COMN submission: "${evName}"`,
-          `<p>Hi there,</p>
-           <p>Thank you for submitting to COMN — Common Ground.</p>
-           <p>Unfortunately, our team was unable to approve <strong>${escHtml(evName)}</strong> at this time.</p>
-           ${reason ? `<p><strong>Reason:</strong> ${escHtml(reason)}</p>` : ""}
-           <p>You're welcome to make changes and resubmit at <a href="https://comnground.net">comnground.net</a>.</p>
-           <p style="color:#888;font-size:12px">— The COMN Team</p>`
-        ).catch(() => {});
-      }
-      return res.json({ success: true, newStatus: "rejected" });
-    }
-
-    // APPROVE — Policy 12: Conflict-of-interest check
-    // Admins may not approve events they submitted or events from their own organization
-    const submitterEmail = (current.fields?.SubmitterEmail || "").toLowerCase();
-    if (submitterEmail && submitterEmail === adminEmail.toLowerCase()) {
-      return res.status(403).json({
-        error: "Policy 12: You cannot approve an event you submitted yourself. Another admin must review this event.",
-      });
-    }
-    const GENERIC_DOMAINS = ["gmail.com","yahoo.com","hotmail.com","outlook.com","icloud.com","protonmail.com","me.com","aol.com","live.com","msn.com"];
-    const adminDomain     = (adminEmail.split("@")[1] || "").toLowerCase();
-    const submitterDomain = (submitterEmail.split("@")[1] || "").toLowerCase();
-    if (submitterEmail && adminDomain && submitterDomain && adminDomain === submitterDomain && !GENERIC_DOMAINS.includes(adminDomain)) {
-      return res.status(403).json({
-        error: `Policy 12: You share an organization domain (@${adminDomain}) with the event submitter. Another admin must approve this event to avoid a conflict of interest.`,
-      });
-    }
-
-    // APPROVE — strip admin-internal notes before going live
-    const rawDesc     = current.fields?.Description || "";
-    const cleanDesc   = hasAdminNote(rawDesc) ? stripAdminNotes(rawDesc) : rawDesc;
-    const descChanged = cleanDesc !== rawDesc;
-
-    // Warn if event date is >90 days out
-    const eventDate = current.fields?.Date || "";
-    const ninetyDaysOut = new Date(); ninetyDaysOut.setDate(ninetyDaysOut.getDate() + 90);
-    const farFuture = eventDate && new Date(eventDate) > ninetyDaysOut;
-
-    if (adminRole === "super_admin") {
-      // Super admin: instant live — they count as the full approval chain
-      const patchFields = { Status: "live", Approvers: `${adminEmail} (super admin)`, RejectedBy: "" };
-      if (descChanged) patchFields.Description = cleanDesc;
-      await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
-      console.log(`[SUPER ADMIN → LIVE] ${eventId} by ${adminEmail}${descChanged ? " (admin notes stripped)" : ""}`);
-      return res.json({
-        success: true, newStatus: "live",
-        message: "Event is now live!" + (descChanged ? " (Admin notes were stripped from description.)" : ""),
-        farFuture,
-      });
-    }
-
-    // Regular admin — two-step
-    if (currentStatus === "pending") {
-      const patchFields = { Status: "pending_2nd", Approvers: adminEmail };
-      if (descChanged) patchFields.Description = cleanDesc;
-      await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
-      console.log(`[1ST APPROVAL] ${eventId} by ${adminEmail} — awaiting 2nd`);
-      return res.json({
-        success: true, newStatus: "pending_2nd",
-        message: "First approval done! A second admin must now approve before it goes live.",
-        farFuture,
-      });
-    }
-
-    if (currentStatus === "pending_2nd") {
-      if (currentApprovers.includes(adminEmail))
-        return res.status(400).json({
-          error: "You already gave the first approval. A different admin must give the second.",
-        });
-      const allApprovers = [currentApprovers, adminEmail].filter(Boolean).join(", ");
-      const patchFields = { Status: "live", Approvers: allApprovers };
-      if (descChanged) patchFields.Description = cleanDesc;
-      await airtable(`/${eventId}`, "PATCH", { fields: patchFields });
-      console.log(`[2ND APPROVAL → LIVE] ${eventId}. Approvers: ${allApprovers}${descChanged ? " (admin notes stripped)" : ""}`);
-      return res.json({
-        success: true, newStatus: "live",
-        message: "Event approved and now live!" + (descChanged ? " (Admin notes were stripped from description.)" : ""),
-        farFuture,
-      });
-    }
-
-    return res.status(400).json({ error: `Cannot approve event with status: ${currentStatus}` });
-
+    const [code, payload] = await reviewEvent(req.admin, req.params.id, req.body.action, req.body.reason);
+    res.status(code).json(payload);
   } catch(e) {
     console.error("PATCH /admin/events/:id:", e.message);
     res.status(500).json({ error: "Failed to update event" });
   }
+});
+
+// Approve or reject many events at once: { ids: [...], action: "approve"|"reject", reason? }
+app.post("/admin/events/bulk", requireAuth, async (req, res) => {
+  const { ids, action, reason } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100)
+    return res.status(400).json({ error: "ids must be a list of 1–100 event ids" });
+  const results = [];
+  for (const id of ids) {
+    if (!/^rec[A-Za-z0-9]{14}$/.test(id)) { results.push({ id, ok: false, error: "bad id" }); continue; }
+    try {
+      const [code, payload] = await reviewEvent(req.admin, id, action, reason);
+      results.push({ id, ok: code === 200, newStatus: payload.newStatus, error: payload.error });
+    } catch(e) { results.push({ id, ok: false, error: "Failed to update event" }); }
+  }
+  res.json({ results, done: results.filter(r => r.ok).length });
 });
 
 // Edit an event — resets status to pending (unless super_admin uses keepLive)
@@ -2282,9 +2415,9 @@ app.get("/admin/stats", requireAuth, async (req, res) => {
     const statuses = ["pending", "pending_2nd", "live", "rejected", "duplicate"];
     const counts = {};
     await Promise.all(statuses.map(async s => {
+      if (["pending", "pending_2nd", "live"].includes(s)) { counts[s] = await countUpcoming([s]); return; }
       const filter = encodeURIComponent(`{Status}='${s}'`);
-      const data = await airtable(`?filterByFormula=${filter}&fields[]=Status`);
-      counts[s] = (data.records || []).length;
+      counts[s] = (await airtableAll(`filterByFormula=${filter}&fields[]=Status`)).length;
     }));
     res.json(counts);
   } catch(e) {
@@ -2293,9 +2426,15 @@ app.get("/admin/stats", requireAuth, async (req, res) => {
   }
 });
 
+// Fast review queue: one page, bulk approve/reject, keyboard shortcuts. Login happens on the page.
+app.get("/review", (req, res) => res.sendFile(path.join(__dirname, "review.html")));
+
 // Manual scrape trigger
 app.post("/admin/scrape-now", requireAuth, async (req, res) => {
-  res.json({ message: "Scrape started — new events will appear in your queue shortly" });
+  const alreadyRunning = !!scrapeInProgress;
+  res.json({ message: alreadyRunning
+    ? "A scrape is already running — new events will appear in your queue shortly"
+    : "Scrape started — new events will appear in your queue shortly" });
   runScraper();
 });
 
@@ -2351,4 +2490,7 @@ app.post("/bug-report", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`COMN server on port ${PORT}`));
+if (require.main === module) app.listen(PORT, () => console.log(`COMN server on port ${PORT}`));
+
+// For local checks of the filtering and dedup rules
+module.exports = { app, classifyCandidates, dropReason, isSimilarEvent, mobilizeToEvent, localParts, reviewNote };

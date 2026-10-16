@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>COMN Quick Review</title>
+<style>
+  :root { --bg:#f6f5f2; --card:#fff; --ink:#1c1c1c; --muted:#6b6b6b; --line:#e2e0db; --go:#1f7a4d; --no:#b3261e; --note:#8a5a00; --focus:#2b5fd9; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#151515; --card:#1f1f1f; --ink:#eee; --muted:#a0a0a0; --line:#333; --go:#4cc38a; --no:#ff7b72; --note:#e3b341; --focus:#7aa2ff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 -apple-system, system-ui, Segoe UI, Roboto, sans-serif; }
+  header { position:sticky; top:0; z-index:2; background:var(--bg); border-bottom:1px solid var(--line); padding:10px 16px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  header h1 { font-size:17px; margin:0 12px 0 0; }
+  main { max-width:820px; margin:0 auto; padding:12px 16px 80px; }
+  button { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:8px; padding:6px 12px; cursor:pointer; }
+  button.go { border-color:var(--go); color:var(--go); }
+  button.no { border-color:var(--no); color:var(--no); }
+  button.tab[aria-pressed=true] { background:var(--ink); color:var(--bg); }
+  button:disabled { opacity:.5; cursor:default; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin:10px 0; display:flex; gap:12px; }
+  .card.focus { outline:2px solid var(--focus); }
+  .card.done { opacity:.35; }
+  .card input { margin-top:4px; width:18px; height:18px; flex:none; }
+  .body { flex:1; min-width:0; }
+  .name { font-weight:600; }
+  .meta { color:var(--muted); font-size:13px; margin-top:2px; overflow-wrap:anywhere; }
+  .desc { font-size:14px; margin-top:6px; }
+  .note { color:var(--note); font-size:13px; margin-top:4px; }
+  .actions { display:flex; flex-direction:column; gap:6px; flex:none; }
+  .muted { color:var(--muted); }
+  form { max-width:340px; margin:60px auto; display:grid; gap:10px; }
+  input[type=email], input[type=password] { font:inherit; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--ink); }
+  .err { color:var(--no); }
+  .spacer { flex:1; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const API = location.origin;
+let token = sessionStorage.getItem("comnReviewToken") || "";
+let tab = "pending", records = [], focus = 0, selected = new Set(), done = new Map();
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, { ...opts, headers: { "Content-Type": "application/json", Authorization: "Bearer " + token, ...(opts.headers || {}) } });
+  if (res.status === 401) { token = ""; sessionStorage.removeItem("comnReviewToken"); renderLogin("Your session expired. Log in again to keep going."); throw new Error("401"); }
+  return res.json();
+}
+
+function renderLogin(msg = "") {
+  $("#app").innerHTML = `<form id="login"><h1>COMN Quick Review</h1>
+    <input type="email" id="email" placeholder="Email" autocomplete="username" required>
+    <input type="password" id="pw" placeholder="Password" autocomplete="current-password" required>
+    <button class="go" type="submit">Log in</button><div class="err">${esc(msg)}</div></form>`;
+  $("#login").onsubmit = async ev => {
+    ev.preventDefault();
+    const res = await fetch(API + "/admin/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: $("#email").value, password: $("#pw").value }) });
+    const data = await res.json();
+    if (!res.ok) return renderLogin(data.error || "Login failed");
+    token = data.token; sessionStorage.setItem("comnReviewToken", token);
+    load();
+  };
+}
+
+async function load() {
+  $("#app").innerHTML = `<main class="muted">Loading…</main>`;
+  try {
+    const data = await api(`/admin/events?status=${tab}`);
+    records = data.records || []; focus = 0; selected = new Set(); done = new Map();
+    render();
+  } catch (e) { if (e.message !== "401") $("#app").innerHTML = `<main class="err">Could not load events.</main>`; }
+}
+
+function fmtWhen(f) {
+  if (!f.Date) return "No date";
+  const d = new Date(f.Date + "T12:00:00");
+  const day = d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  if (!f.Time) return day;
+  const [h, m] = f.Time.split(":").map(Number);
+  return `${day} · ${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+}
+const host = u => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
+
+function render() {
+  const left = records.filter(r => !done.has(r.id)).length;
+  $("#app").innerHTML = `
+  <header>
+    <h1>COMN Review</h1>
+    <button class="tab" data-tab="pending" aria-pressed="${tab === "pending"}">Pending</button>
+    <button class="tab" data-tab="duplicate" aria-pressed="${tab === "duplicate"}">Duplicates</button>
+    <span class="muted">${left} left</span>
+    <span class="spacer"></span>
+    <button id="all">${selected.size ? "Clear" : "Select all"}</button>
+    ${tab === "pending"
+      ? `<button class="go" id="bulkGo" ${selected.size ? "" : "disabled"}>Approve ${selected.size || ""}</button>
+         <button class="no" id="bulkNo" ${selected.size ? "" : "disabled"}>Reject ${selected.size || ""}</button>`
+      : `<button class="go" id="bulkRestore" ${selected.size ? "" : "disabled"}>Restore ${selected.size || ""}</button>
+         <button class="no" id="bulkNo" ${selected.size ? "" : "disabled"}>Reject ${selected.size || ""}</button>`}
+  </header>
+  <main>
+    <p class="muted">Keys: j/k move · x select · a approve · r reject · o open source</p>
+    ${records.length === 0 ? `<p>Nothing to review. 🎉</p>` : ""}
+    ${records.map((r, i) => {
+      const f = r.fields || {};
+      const st = done.get(r.id);
+      return `<div class="card ${i === focus ? "focus" : ""} ${st ? "done" : ""}" data-i="${i}">
+        <input type="checkbox" data-sel="${r.id}" ${selected.has(r.id) ? "checked" : ""} ${st ? "disabled" : ""} aria-label="Select">
+        <div class="body">
+          <div class="name">${esc(f.Name)}</div>
+          <div class="meta">${esc(fmtWhen(f))} · ${esc(f.Type || "")} · ${esc(f.Address || "No location")}</div>
+          <div class="meta">${f.Source ? `<a href="${esc(f.Source)}" target="_blank" rel="noopener">${esc(host(f.Source) || "source")}</a>` : "No source link"} · ${esc(f.SubmittedBy || "")}</div>
+          ${f.ReviewNote ? `<div class="note">⚑ ${esc(f.ReviewNote)}</div>` : ""}
+          ${f.Description ? `<div class="desc">${esc(f.Description.slice(0, 260))}</div>` : ""}
+          ${st ? `<div class="note">${esc(st)}</div>` : ""}
+        </div>
+        <div class="actions">
+          ${tab === "pending"
+            ? `<button class="go" data-act="approve" data-id="${r.id}" ${st ? "disabled" : ""}>Approve</button>`
+            : `<button class="go" data-act="restore" data-id="${r.id}" ${st ? "disabled" : ""}>Restore</button>`}
+          <button class="no" data-act="reject" data-id="${r.id}" ${st ? "disabled" : ""}>Reject</button>
+        </div>
+      </div>`;
+    }).join("")}
+  </main>`;
+  document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { tab = b.dataset.tab; load(); });
+  document.querySelectorAll("[data-sel]").forEach(c => c.onchange = () => { c.checked ? selected.add(c.dataset.sel) : selected.delete(c.dataset.sel); render(); });
+  document.querySelectorAll("[data-act]").forEach(b => b.onclick = () => act([b.dataset.id], b.dataset.act));
+  $("#all").onclick = () => { selected = selected.size ? new Set() : new Set(records.filter(r => !done.has(r.id)).map(r => r.id)); render(); };
+  if ($("#bulkGo")) $("#bulkGo").onclick = () => act([...selected], "approve");
+  if ($("#bulkRestore")) $("#bulkRestore").onclick = () => act([...selected], "restore");
+  $("#bulkNo").onclick = () => act([...selected], "reject");
+  document.querySelector(".card.focus")?.scrollIntoView({ block: "nearest" });
+}
+
+async function act(ids, action) {
+  ids = ids.filter(id => !done.has(id));
+  if (!ids.length) return;
+  if (ids.length > 1 && !confirm(`${action[0].toUpperCase() + action.slice(1)} ${ids.length} events?`)) return;
+  try {
+    if (action === "restore") {
+      for (const id of ids) {
+        const r = await api(`/admin/events/${id}/restore`, { method: "POST" });
+        done.set(id, r.success ? "Restored to pending" : (r.error || "Failed"));
+      }
+    } else {
+      const r = await api("/admin/events/bulk", { method: "POST", body: JSON.stringify({ ids, action }) });
+      for (const x of r.results || []) done.set(x.id, x.ok ? (x.newStatus === "live" ? "Live ✓" : x.newStatus === "rejected" ? "Rejected" : "Approved, needs a 2nd admin") : (x.error || "Failed"));
+    }
+  } catch (e) { if (e.message === "401") return; alert("Something went wrong. Nothing was lost — try again."); }
+  ids.forEach(id => selected.delete(id));
+  const next = records.findIndex((r, i) => i > focus && !done.has(r.id));
+  if (next !== -1 && ids.length === 1) focus = next;
+  render();
+}
+
+document.addEventListener("keydown", e => {
+  if (!token || e.target.matches("input[type=email], input[type=password]") || e.metaKey || e.ctrlKey) return;
+  const r = records[focus];
+  if (e.key === "j") { focus = Math.min(records.length - 1, focus + 1); render(); }
+  else if (e.key === "k") { focus = Math.max(0, focus - 1); render(); }
+  else if (e.key === "x" && r && !done.has(r.id)) { selected.has(r.id) ? selected.delete(r.id) : selected.add(r.id); render(); }
+  else if (e.key === "a" && r && tab === "pending") act([r.id], "approve");
+  else if (e.key === "r" && r) act([r.id], "reject");
+  else if (e.key === "o" && r?.fields?.Source) window.open(r.fields.Source, "_blank", "noopener");
+});
+
+token ? load() : renderLogin();
+</script>
+</body>
+</html>
